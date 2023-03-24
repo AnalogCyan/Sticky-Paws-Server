@@ -1,0 +1,5 @@
+Flask>=2.0.0
+Flask-Limiter>=2.0.0
+google-cloud-storage>=1.43.0
+google-cloud-secret-manager>=1.1.0
+Werkzeug>=2.0.0
