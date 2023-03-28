@@ -1,6 +1,6 @@
 # Sticky Paws Server
 
-This repository contains the server-side code for the game [Sticky Paws DX](https://github.com/Jonnil/Sticky-Paws-DX). The server is written in Python and provides API endpoints for uploading, listing, and downloading custom levels.
+This repository contains the server-side code for the game [Sticky Paws](https://github.com/Jonnil/Sticky-Paws-DX). The server is written in Python and provides API endpoints for uploading, listing, and downloading custom levels.
 
 ## API Endpoints
 
