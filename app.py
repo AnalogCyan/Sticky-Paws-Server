@@ -71,13 +71,17 @@ def upload_level():
 @app.route('/levels', methods=['GET'])
 @limiter.limit("10 per minute")
 def get_levels():
-    levels = []
+    blobs = bucket.list_blobs()
 
-    for blob in bucket.list_blobs(prefix="levels/"):
-        if blob.name != "levels/":
-            levels.append({"name": blob.name, "url": blob.public_url})
+    levels = [{
+        'name': blob.name,
+        'time_created': blob.time_created
+    } for blob in blobs if blob.name.startswith("levels/")]
 
-    return jsonify(levels), 200
+    sorted_levels = sorted(
+        levels, key=lambda x: x['time_created'], reverse=True)
+
+    return jsonify(sorted_levels), 200
 
 
 # Download a specific level file from Google Cloud Storage
