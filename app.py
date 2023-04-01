@@ -76,7 +76,7 @@ def get_levels():
     levels = [{
         'name': blob.name,
         'time_created': blob.time_created
-    } for blob in blobs if blob.name.startswith("levels/")]
+    } for blob in blobs if blob.name.startswith("levels/") and blob.name.endswith(".zip")]
 
     sorted_levels = sorted(
         levels, key=lambda x: x['time_created'], reverse=True)
