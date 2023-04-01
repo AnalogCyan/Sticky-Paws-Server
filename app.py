@@ -47,7 +47,7 @@ def serve_static(path):
     return send_from_directory('static', path)
 
 
-# Upload a new level to Google Cloud Storage
+# Upload a new content file to Google Cloud Storage
 @app.route('/upload', methods=['POST'])
 @limiter.exempt
 # @limiter.limit("5 per minute")
@@ -89,7 +89,24 @@ def get_levels():
     return jsonify(sorted_levels), 200
 
 
-# Download a specific level file from Google Cloud Storage
+# Retrieve a list of available characters from Google Cloud Storage
+@app.route('/characters', methods=['GET'])
+@limiter.limit("10 per minute")
+def get_characters():
+    blobs = bucket.list_blobs()
+
+    characters = [{
+        'name': blob.name,
+        'time_created': blob.time_created
+    } for blob in blobs if blob.name.startswith("characters/") and blob.name.endswith(".zip")]
+
+    sorted_characters = sorted(
+        characters, key=lambda x: x['time_created'], reverse=True)
+
+    return jsonify(sorted_characters), 200
+
+
+# Download a specific content file from Google Cloud Storage
 @app.route('/download/<content_type>/<file_name>', methods=['GET'])
 @limiter.limit("10 per minute")
 def download_content(content_type, file_name):
