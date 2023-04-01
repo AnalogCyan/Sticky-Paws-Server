@@ -27,7 +27,6 @@ async function loadLevels() {
     }
   } catch (error) {
     console.error("Error fetching levels:", error);
-    alert(`Error fetching levels: ${error.message}`);
   }
 }
 
@@ -60,7 +59,6 @@ async function loadCharacters() {
     }
   } catch (error) {
     console.error("Error fetching characters:", error);
-    alert(`Error fetching characters: ${error.message}`);
   }
 }
 
