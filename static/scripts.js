@@ -19,7 +19,10 @@ async function loadLevels() {
     // Add the fetched levels to the list
     for (const level of levels) {
       const listItem = document.createElement("li");
-      listItem.textContent = level.name.replace("levels/", "");
+      listItem.textContent = `${level.name.replace(
+        "levels/",
+        ""
+      )} - Uploaded: ${level.time_created}`;
       levelList.appendChild(listItem);
     }
   } catch (error) {
