@@ -49,7 +49,8 @@ def serve_static(path):
 
 # Upload a new level to Google Cloud Storage
 @app.route('/upload', methods=['POST'])
-@limiter.limit("5 per minute")
+@limiter.exempt
+# @limiter.limit("5 per minute")
 def upload_level():
     #! Temporary API key for testing. Do not use in production.
     #! TODO: Update API security
@@ -57,14 +58,18 @@ def upload_level():
     if request.headers.get("X-API-Key") != api_key:
         return "Unauthorized", 401
 
-    level_data_base64 = request.form['data']
-    level_data = base64.b64decode(level_data_base64)
-    level_filename = "levels/" + request.form['name']
+    content_data_base64 = request.form['data']
+    content_data = base64.b64decode(content_data_base64)
+    content_type = request.form['content_type']
 
-    blob = bucket.blob(level_filename)
-    blob.upload_from_string(level_data, content_type="application/zip")
+    if content_type not in ["levels", "characters"]:
+        return "Invalid content type", 400
+    content_filename = f"{content_type}" + "/" + request.form['name']
 
-    return "Level uploaded successfully", 200
+    blob = bucket.blob(content_filename)
+    blob.upload_from_string(content_data, content_type="application/zip")
+
+    return f"{content_type[:-1].capitalize()} uploaded successfully", 200
 
 
 # Retrieve a list of available levels from Google Cloud Storage
@@ -85,24 +90,28 @@ def get_levels():
 
 
 # Download a specific level file from Google Cloud Storage
-@app.route('/download/<file_name>', methods=['GET'])
+@app.route('/download/<content_type>/<file_name>', methods=['GET'])
 @limiter.limit("10 per minute")
-def download_level(file_name):
+def download_content(content_type, file_name):
+    if content_type not in ["levels", "characters"]:
+        abort(400, "Invalid content type")
+
     if not allowed_file(file_name + '.zip'):
         abort(400, "Invalid file extension")
 
-    level_filename = f"levels/{file_name}.zip"
-    blob = bucket.blob(level_filename)
+    content_filename = f"{content_type}/{file_name}.zip"
+    blob = bucket.blob(content_filename)
 
     if not blob.exists():
         abort(404, "File not found")
 
-    with io.BytesIO() as level_data:
-        blob.download_to_file(level_data)
-        level_data.seek(0)
-        level_data_base64 = base64.b64encode(level_data.read()).decode('utf-8')
+    with io.BytesIO() as content_data:
+        blob.download_to_file(content_data)
+        content_data.seek(0)
+        content_data_base64 = base64.b64encode(
+            content_data.read()).decode('utf-8')
 
-    return jsonify({"name": file_name, "data": level_data_base64}), 200
+    return jsonify({"name": file_name, "data": content_data_base64}), 200
 
 
 if __name__ == "__main__":
