@@ -5,7 +5,7 @@ from google.cloud import storage, secretmanager
 import os
 import base64
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Initialize Flask app and rate limiter
 app = Flask(__name__)
@@ -81,7 +81,7 @@ def get_levels():
 
     levels = [{
         'name': blob.name,
-        'time_created': datetime.fromisoformat(blob.time_created.isoformat()).isoformat()
+        'time_created': blob.time_created.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     } for blob in blobs if blob.name.startswith("levels/") and blob.name.endswith(".zip")]
 
     sorted_levels = sorted(
@@ -98,7 +98,7 @@ def get_characters():
 
     characters = [{
         'name': blob.name,
-        'time_created': datetime.fromisoformat(blob.time_created.isoformat()).isoformat()
+        'time_created': blob.time_created.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     } for blob in blobs if blob.name.startswith("characters/") and blob.name.endswith(".zip")]
 
     sorted_characters = sorted(
