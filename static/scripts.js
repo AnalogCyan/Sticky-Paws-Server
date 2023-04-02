@@ -70,4 +70,4 @@ loadCharacters();
 setInterval(() => {
   loadLevels();
   loadCharacters();
-}, 10000);
+}, 30000);
