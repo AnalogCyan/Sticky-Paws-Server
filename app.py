@@ -1,10 +1,12 @@
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_file, send_from_directory, abort
 from flask_limiter import Limiter
 from flask_talisman import Talisman
 from google.cloud import storage, secretmanager
 import os
 import base64
 import io
+import zipfile
+import zlib
 from datetime import datetime, timezone
 import antigravity
 
@@ -29,6 +31,36 @@ secret_value = response.payload.data.decode('UTF-8')
 
 # Configure allowed file extensions
 ALLOWED_EXTENSIONS = {'zip'}
+
+
+def verify_file(content_type, content_data):
+    try:
+        with zipfile.ZipFile(io.BytesIO(content_data), 'r') as zip_ref:
+            if content_type == "levels":
+                required_files = {"level_information.ini",
+                                  "object_placement_all.json"}
+                thumbnail_files = {"thumbnail.png", "automatic_thumbnail.png"}
+            elif content_type == "characters":
+                required_files = {"character_config.ini"}
+                thumbnail_files = set()
+
+            # Check if all required files are present in the uploaded zip file
+            zip_files = set(zip_ref.namelist())
+            zip_files_no_folder = {file.split("/")[-1] for file in zip_files}
+
+            if not required_files.issubset(zip_files_no_folder):
+                return False
+
+            # Check if at least one thumbnail file is present for the "levels" content type
+            if content_type == "levels" and not thumbnail_files.intersection(zip_files_no_folder):
+                return False
+
+            # Add more file-specific validations here if needed
+
+            return True
+    except zipfile.BadZipFile:
+        # If the uploaded file is not a valid zip file, return False
+        return False
 
 
 def allowed_file(filename):
@@ -68,6 +100,9 @@ def upload_level():
         return "Invalid content type", 400
     content_filename = f"{content_type}" + "/" + request.form['name']
 
+    if not verify_file(content_type, content_data):
+        return "Invalid file structure", 400
+
     blob = bucket.blob(content_filename)
     blob.upload_from_string(content_data, content_type="application/zip")
 
@@ -76,7 +111,8 @@ def upload_level():
 
 # Retrieve a list of available levels from Google Cloud Storage
 @app.route('/levels', methods=['GET'])
-@limiter.limit("10 per minute")
+@limiter.exempt
+# @limiter.limit("10 per minute")
 def get_levels():
     blobs = bucket.list_blobs()
 
@@ -93,7 +129,8 @@ def get_levels():
 
 # Retrieve a list of available characters from Google Cloud Storage
 @app.route('/characters', methods=['GET'])
-@limiter.limit("10 per minute")
+@limiter.exempt
+# @limiter.limit("10 per minute")
 def get_characters():
     blobs = bucket.list_blobs()
 
@@ -116,7 +153,7 @@ def download_content(content_type, file_name):
         abort(400, "Invalid content type")
 
     if not allowed_file(file_name + '.zip'):
-        abort(400, "Invalid file extension")
+        abort(400, "Invalid file type")
 
     content_filename = f"{content_type}/{file_name}.zip"
     blob = bucket.blob(content_filename)
