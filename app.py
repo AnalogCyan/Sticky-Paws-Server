@@ -37,23 +37,30 @@ def verify_file(content_type, content_data):
     try:
         with zipfile.ZipFile(io.BytesIO(content_data), 'r') as zip_ref:
             if content_type == "levels":
-                required_files = {"level_information.ini",
-                                  "object_placement_all.json"}
+                required_files = {"level_information.ini"}
                 thumbnail_files = {"thumbnail.png", "automatic_thumbnail.png"}
+                object_placement_files = {
+                    "object_placement_all.json", "object_placement_all.txt"}
             elif content_type == "characters":
                 required_files = {"character_config.ini"}
                 thumbnail_files = set()
+                object_placement_files = set()
 
             # Check if all required files are present in the uploaded zip file
-            zip_files = set(zip_ref.namelist())
-            zip_files_no_folder = {file.split("/")[-1] for file in zip_files}
+            zip_files_no_folder = {file.split(
+                "/")[-1] for file in zip_ref.namelist()}
 
             if not required_files.issubset(zip_files_no_folder):
                 return False
 
             # Check if at least one thumbnail file is present for the "levels" content type
-            if content_type == "levels" and not thumbnail_files.intersection(zip_files_no_folder):
-                return False
+            if content_type == "levels":
+                if not thumbnail_files.intersection(zip_files_no_folder):
+                    return False
+
+                # Check if at least one object placement file is present
+                if not object_placement_files.intersection(zip_files_no_folder):
+                    return False
 
             # Add more file-specific validations here if needed
 
