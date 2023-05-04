@@ -1,6 +1,10 @@
-Flask>=2.0.0
-Flask-Limiter>=2.0.0
-Flask-Talisman>=1.0.0
-google-cloud-storage>=1.43.0
-google-cloud-secret-manager>=1.1.0
+Flask>=1.1.2
+Flask-Limiter>=1.4
+Flask-Talisman>=0.8.1
+google-cloud-storage>=1.42.0
+google-cloud-secret-manager>=1.0.0
+base64>=1.0.0
+io>=0.0.1
+zipfile>=3.7
+zlib>=1.2.11
 antigravity==0.1
