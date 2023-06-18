@@ -5,10 +5,16 @@ from google.cloud import storage, secretmanager
 import os
 import base64
 import io
+import re
 import zipfile
+from zipfile import ZipFile
 import zlib
 from datetime import datetime, timezone
 import antigravity
+import base64
+import json
+from PIL import Image
+from wtforms import Form, StringField, validators
 
 # Initialize Flask app and rate limiter
 app = Flask(__name__)
@@ -24,13 +30,11 @@ client = secretmanager.SecretManagerServiceClient()
 name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".format(
     project_id="236548638255",
     secret_name="server-api-key",
-    version_id="1"
+    version_id="latest"
 )
 response = client.access_secret_version(name=name)
 secret_value = response.payload.data.decode('UTF-8')
-
-# Configure allowed file extensions
-ALLOWED_EXTENSIONS = {'zip'}
+API_KEY = secret_value
 
 
 def verify_file(content_type, content_data):
@@ -70,8 +74,8 @@ def verify_file(content_type, content_data):
         return False
 
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def allowed_filename(filename):
+    return filename.isalnum() and len(filename) == 9
 
 
 # Initialize Google Cloud Storage client
@@ -93,22 +97,22 @@ def serve_static(path):
 @limiter.exempt
 # @limiter.limit("5 per minute")
 def upload_level():
-    #! Temporary API key for testing. Do not use in production.
-    #! TODO: Update API security
-    api_key = "626ef06a-5092-4d09-b423-45480b1d4e4d"
-    if request.headers.get("X-API-Key") != api_key:
+    if request.headers.get("X-API-Key") != API_KEY:
         return "Unauthorized", 401
+
+    if not allowed_filename(request.form['name']):
+        abort(400, "Invalid file")
 
     content_data_base64 = request.form['data']
     content_data = base64.b64decode(content_data_base64)
     content_type = request.form['content_type']
 
     if content_type not in ["levels", "characters"]:
-        return "Invalid content type", 400
+        return "Invalid content", 400
     content_filename = f"{content_type}" + "/" + request.form['name']
 
     if not verify_file(content_type, content_data):
-        return "Invalid file structure", 400
+        return "Invalid file", 400
 
     blob = bucket.blob(content_filename)
     blob.upload_from_string(content_data, content_type="application/zip")
@@ -152,15 +156,55 @@ def get_characters():
     return jsonify(sorted_characters), 200
 
 
+# Retrieve metadata for a specific content file from Google Cloud Storage
+@app.route('/metadata/<string:category>/<string:blob_name>', methods=['GET'])
+@limiter.exempt
+def get_metadata(category, blob_name):
+    if request.headers.get("X-API-Key") != API_KEY:
+        return "Unauthorized", 401
+
+    if category not in ['levels', 'characters']:
+        return "Invalid request.", 400
+
+    if not allowed_filename(blob_name):
+        abort(400, "Invalid file")
+
+    blob_name = f"{category}/{blob_name}.zip"
+
+    blob = bucket.get_blob(blob_name)
+    zip_bytes = blob.download_as_bytes()
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zip_file:
+        root_folder = zip_file.namelist()[0].split('/')[0]
+        name = root_folder
+
+        thumbnail_data = None
+        for file_name in ["thumbnail.png", "automatic_thumbnail.png"]:
+            try:
+                with zip_file.open(f"{root_folder}/{file_name}") as image_file:
+                    thumbnail_data = base64.b64encode(
+                        image_file.read()).decode('utf-8')
+                    break
+            except KeyError:
+                continue
+        if thumbnail_data is None:
+            raise Exception("Invalid file structure.")
+
+    return json.dumps({"name": name, "thumbnail": thumbnail_data})
+
+
 # Download a specific content file from Google Cloud Storage
 @app.route('/download/<content_type>/<file_name>', methods=['GET'])
 @limiter.limit("10 per minute")
 def download_content(content_type, file_name):
-    if content_type not in ["levels", "characters"]:
-        abort(400, "Invalid content type")
+    if request.headers.get("X-API-Key") != API_KEY:
+        return "Unauthorized", 401
 
-    if not allowed_file(file_name + '.zip'):
-        abort(400, "Invalid file type")
+    if content_type not in ["levels", "characters"]:
+        abort(400, "Invalid content")
+
+    if not allowed_filename(file_name):
+        abort(400, "Invalid file")
 
     content_filename = f"{content_type}/{file_name}.zip"
     blob = bucket.blob(content_filename)
