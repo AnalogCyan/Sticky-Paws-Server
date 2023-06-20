@@ -1,31 +1,26 @@
-import base64
-import io
-import json
+# Import required libraries
 import os
-import re
+import io
+import base64
 import zipfile
-import zlib
-from datetime import datetime, timezone
+import json
+from datetime import timezone
 from io import BytesIO
-from zipfile import ZipFile
-
-from PIL import Image
-from flask import Flask, request, jsonify, send_file, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_limiter import Limiter
 from flask_talisman import Talisman
 from google.cloud import storage, secretmanager
 from passageidentity import Passage
-from wtforms import Form, StringField, validators
 
-import antigravity
-
-
-# Initialize Flask app and rate limiter
+# Initialize Flask application
 app = Flask(__name__)
+
+# Configurations for Flask application
 app.config["SERVER_NAME"] = "sticky-paws.uc.r.appspot.com"
 app.config["SESSION_COOKIE_SECURE"] = True
 app.config["REMEMBER_COOKIE_SECURE"] = True
 
+# Initialize Flask plugins
 limiter = Limiter(app, default_limits=["10 per minute"])
 Talisman(app)
 
@@ -38,10 +33,11 @@ response = client.access_secret_version(name=name)
 secret_value = response.payload.data.decode("UTF-8")
 API_KEY = secret_value
 
-# Configure Passage for authentication
+# Passage authentication configurations
 PASSAGE_APP_ID = os.environ.get("PASSAGE_APP_ID")
 
 
+# Custom Middleware for Authentication
 class AuthenticationMiddleware(object):
     def __init__(self, app):
         self.app = app
@@ -58,6 +54,7 @@ class AuthenticationMiddleware(object):
         return self.app(environ, start_response)
 
 
+# Route for authentication checks
 @app.route("/auth", methods=["GET", "POST"])
 def authenticatedRoute():
     passageID = environ["user"]
@@ -66,6 +63,7 @@ def authenticatedRoute():
         return "Authorized"
 
 
+# Helper function to check if a file's size is within allowed limit
 def allowed_size(file, max_size=32):
     # Check if file is a file-like object
     if not hasattr(file, "read") or not hasattr(file, "seek"):
@@ -90,6 +88,7 @@ def allowed_size(file, max_size=32):
     return size_in_megabytes <= max_size
 
 
+# Helper function to verify the uploaded file content
 def verify_file(content_type, content_data):
     try:
         with zipfile.ZipFile(io.BytesIO(content_data), "r") as zip_ref:
@@ -128,6 +127,7 @@ def verify_file(content_type, content_data):
         return False
 
 
+# Helper function to check if filename is valid
 def allowed_filename(filename):
     return filename.isalnum() and len(filename) == 9
 
@@ -138,7 +138,7 @@ bucket_name = "sticky-paws.appspot.com"
 bucket = storage_client.get_bucket(bucket_name)
 
 
-# Serve static files (HTML, CSS, JS, etc.)
+# Route to serve static files (HTML, CSS, JS, etc.)
 @app.route("/", defaults={"path": "index.html"})
 @app.route("/<path:path>")
 @limiter.exempt
@@ -146,10 +146,9 @@ def serve_static(path):
     return send_from_directory("static", path)
 
 
-# Upload a new content file to Google Cloud Storage
+# Route for uploading a new content file to Google Cloud Storage
 @app.route("/upload", methods=["POST"])
 @limiter.exempt
-# @limiter.limit("5 per minute")
 def upload_level():
     if request.headers.get("X-API-Key") != API_KEY:
         return "Unauthorized", 401
@@ -179,10 +178,9 @@ def upload_level():
     return f"{content_type[:-1].capitalize()} uploaded successfully", 200
 
 
-# Retrieve a list of available levels from Google Cloud Storage
+# Route for retrieving a list of available levels from Google Cloud Storage
 @app.route("/levels", methods=["GET"])
 @limiter.exempt
-# @limiter.limit("10 per minute")
 def get_levels():
     blobs = bucket.list_blobs()
 
@@ -202,10 +200,9 @@ def get_levels():
     return jsonify(sorted_levels), 200
 
 
-# Retrieve a list of available characters from Google Cloud Storage
+# Route for retrieving a list of available characters from Google Cloud Storage
 @app.route("/characters", methods=["GET"])
 @limiter.exempt
-# @limiter.limit("10 per minute")
 def get_characters():
     blobs = bucket.list_blobs()
 
@@ -227,7 +224,7 @@ def get_characters():
     return jsonify(sorted_characters), 200
 
 
-# Retrieve metadata for a specific content file from Google Cloud Storage
+# Route to retrieve metadata for a specific content file from Google Cloud Storage
 @app.route("/metadata/<string:category>/<string:blob_name>", methods=["GET"])
 @limiter.exempt
 def get_metadata(category, blob_name):
@@ -263,7 +260,7 @@ def get_metadata(category, blob_name):
     return json.dumps({"name": name, "thumbnail": thumbnail_data})
 
 
-# Download a specific content file from Google Cloud Storage
+# Route to download a specific content file from Google Cloud Storage
 @app.route("/download/<content_type>/<file_name>", methods=["GET"])
 @limiter.limit("10 per minute")
 def download_content(content_type, file_name):
@@ -290,5 +287,6 @@ def download_content(content_type, file_name):
     return jsonify({"name": file_name, "data": content_data_base64}), 200
 
 
+# Start the Flask application
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
