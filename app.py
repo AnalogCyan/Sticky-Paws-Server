@@ -1,30 +1,45 @@
 # Import required libraries
-import os
-import io
 import base64
-import zipfile
+import io
 import json
+import os
+import time
+import zipfile
+
 from datetime import timezone
-from io import BytesIO
 from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
+from functools import wraps
 from google.cloud import storage, secretmanager
-from passageidentity import Passage
+from io import BytesIO
+from itsdangerous import URLSafeTimedSerializer
+import requests
+
 
 # Initialize Flask application
 app = Flask(__name__)
-
-# Configurations for Flask application
-app.config["SERVER_NAME"] = "sticky-paws.uc.r.appspot.com"
-app.config["SESSION_COOKIE_SECURE"] = True
-app.config["REMEMBER_COOKIE_SECURE"] = True
+app.config.update(
+    dict(
+        SERVER_NAME="sticky-paws.uc.r.appspot.com",
+        PREFERRED_URL_SCHEME="https",
+        SESSION_COOKIE_SECURE=True,
+        REMEMBER_COOKIE_SECURE=True,
+    )
+)
 
 # Initialize Flask plugins
-limiter = Limiter(app, default_limits=["10 per minute"])
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["10 per minute"],
+    storage_uri="memory://",
+    strategy="moving-window",
+)
 Talisman(app)
 
-# Get API key from Google Cloud Secret Manager
+# Get Server API key from Google Cloud Secret Manager
 client = secretmanager.SecretManagerServiceClient()
 name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".format(
     project_id="236548638255", secret_name="server-api-key", version_id="latest"
@@ -33,34 +48,26 @@ response = client.access_secret_version(name=name)
 secret_value = response.payload.data.decode("UTF-8")
 API_KEY = secret_value
 
-# Passage authentication configurations
-PASSAGE_APP_ID = os.environ.get("PASSAGE_APP_ID")
+
+# Get Mailgun API keys from Google Cloud Secret Manager
+client = secretmanager.SecretManagerServiceClient()
+name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".format(
+    project_id="236548638255", secret_name="mailgun-api-key", version_id="latest"
+)
+response = client.access_secret_version(name=name)
+secret_value = response.payload.data.decode("UTF-8")
+MAILGUN_API_KEY = secret_value
 
 
-# Custom Middleware for Authentication
-class AuthenticationMiddleware(object):
-    def __init__(self, app):
-        self.app = app
+# Decorator function to check if the client is authorized to access the API
+def require_api_key(view_function):
+    @wraps(view_function)
+    def decorated_function(*args, **kwargs):
+        if request.headers.get("X-API-Key") != API_KEY:
+            return "Unauthorized", 401
+        return view_function(*args, **kwargs)
 
-    def __call__(self, environ, start_response):
-        request = Request(environ)
-        psg = Passage(PASSAGE_APP_ID)
-        try:
-            user = psg.authenticateRequest(request)
-        except:
-            ret = Response("Authorization failed", mimetype="text/plain", status=401)
-            return ret(environ, start_response)
-        environ["user"] = user
-        return self.app(environ, start_response)
-
-
-# Route for authentication checks
-@app.route("/auth", methods=["GET", "POST"])
-def authenticatedRoute():
-    passageID = environ["user"]
-    authorized = authorizationCheck(passageID)
-    if authorized:
-        return "Authorized"
+    return decorated_function
 
 
 # Helper function to check if a file's size is within allowed limit
@@ -129,6 +136,10 @@ def verify_file(content_type, content_data):
 
 # Helper function to check if filename is valid
 def allowed_filename(filename):
+    # Strip the .zip extension from the filename
+    if filename.endswith(".zip"):
+        filename = filename[:-4]
+
     return filename.isalnum() and len(filename) == 9
 
 
@@ -149,12 +160,10 @@ def serve_static(path):
 # Route for uploading a new content file to Google Cloud Storage
 @app.route("/upload", methods=["POST"])
 @limiter.exempt
+@require_api_key
 def upload_level():
-    if request.headers.get("X-API-Key") != API_KEY:
-        return "Unauthorized", 401
-
-    if not allowed_filename(request.form["name"]):
-        abort(400, "Invalid file")
+    if not allowed_filename(str(request.form["name"])):
+        abort(400, "Invalid filename")
 
     content_data_base64 = request.form["data"]
     content_data = base64.b64decode(content_data_base64)
@@ -165,15 +174,18 @@ def upload_level():
 
     max_allowed_size_in_megabytes = 32
     if not allowed_size(BytesIO(content_data), max_allowed_size_in_megabytes):
-        return "File is too large", 400
+        return "Payload Too Large", 413
 
     content_filename = f"{content_type}" + "/" + request.form["name"]
 
     if not verify_file(content_type, content_data):
-        return "Invalid file", 400
+        return "Unsupported Media Type", 415
 
     blob = bucket.blob(content_filename)
     blob.upload_from_string(content_data, content_type="application/zip")
+    blob.metadata["Uploaded-By"] = (
+        request.access_route[0] if request.access_route else request.remote_addr
+    )
 
     return f"{content_type[:-1].capitalize()} uploaded successfully", 200
 
@@ -228,9 +240,6 @@ def get_characters():
 @app.route("/metadata/<string:category>/<string:blob_name>", methods=["GET"])
 @limiter.exempt
 def get_metadata(category, blob_name):
-    if request.headers.get("X-API-Key") != API_KEY:
-        return "Unauthorized", 401
-
     if category not in ["levels", "characters"]:
         return "Invalid request.", 400
 
@@ -262,11 +271,8 @@ def get_metadata(category, blob_name):
 
 # Route to download a specific content file from Google Cloud Storage
 @app.route("/download/<content_type>/<file_name>", methods=["GET"])
-@limiter.limit("10 per minute")
+@limiter.exempt
 def download_content(content_type, file_name):
-    if request.headers.get("X-API-Key") != API_KEY:
-        return "Unauthorized", 401
-
     if content_type not in ["levels", "characters"]:
         abort(400, "Invalid content")
 
@@ -285,6 +291,77 @@ def download_content(content_type, file_name):
         content_data_base64 = base64.b64encode(content_data.read()).decode("utf-8")
 
     return jsonify({"name": file_name, "data": content_data_base64}), 200
+
+
+# Route for reporting a content file for review
+@app.route("/report/<content_type>/<file_name>", methods=["POST"])
+@limiter.exempt
+def report_content(content_type, file_name):
+    if content_type not in ["levels", "characters"]:
+        abort(400, "Invalid content")
+
+    report_message = request.form.get("report_message", None)
+    content_filename = f"{content_type}/{file_name}.zip"
+    blob = bucket.blob(content_filename)
+    metadata = blob.metadata
+    keys = ["report_count", "report_reason"]
+
+    if not blob.exists():
+        abort(404, "File not found")
+
+    for key in keys:
+        if key == "report_count":
+            value = int(metadata[key])
+            value += 1
+            metadata[key] = str(value)
+        elif key == "report_reason" and report_message is not None:
+            value = metadata[key].split("|") if key in metadata else []
+            value.append(report_message)
+            metadata[key] = "|".join(value)
+
+    blob.metadata = metadata
+    blob.patch()
+
+    if int(metadata[keys[0]]) >= 5:
+        console_url = "https://console.cloud.google.com/storage/browser/{}/{}".format(
+            bucket_name, file_name
+        )
+        requests.post(
+            "https://api.mailgun.net/v3/sandbox198029222f0640d5a146332e0cbdb7a1.mailgun.org/messages",
+            auth=("api", MAILGUN_API_KEY),
+            data={
+                "from": "Mailgun Sandbox <postmaster@sandbox198029222f0640d5a146332e0cbdb7a1.mailgun.org>",
+                "to": "Jonnil <contact@jonnil.games>",
+                "subject": "Sticky Paws - Content Report Alert",
+                "template": "sticky paws - content report alert",
+                "h:X-Mailgun-Variables": '{"file_name": "'
+                + content_filename
+                + '", "file_url": "'
+                + console_url
+                + '"}',
+            },
+        )
+
+
+# Route that returns "418 I'm a teapot" to all requests as an easter egg
+@app.route(
+    "/teapot", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+)
+@app.route(
+    "/coffee", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+)
+@limiter.exempt
+def teapot():
+    return "I'm a teapot", 418
+
+
+# Route that returns "500 lp0 on fire" to all requests as an easter egg
+@app.route(
+    "/print", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+)
+@limiter.exempt
+def print():
+    return "lp0 on fire", 500
 
 
 # Start the Flask application

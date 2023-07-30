@@ -1,9 +1,7 @@
-Pillow
 Flask
 Flask-Limiter
 Flask-Talisman
 google-cloud-storage
 google-cloud-secret-manager
-Passage
-WTForms
-antigravity==0.1
+itsdangerous
+requests
