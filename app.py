@@ -318,7 +318,7 @@ def report_content(content_type, file_name):
             value = int(metadata.get(key, 0)) + 1
             metadata[key] = str(value)
         elif key == "report_reason":
-            message = f'{report_reason}: {report_message or "No message provided."}'
+            message = f'{report_reason}: {report_message if report_message else "No message provided."}'
             reasons = metadata.get(key, "").split("|")
             reasons.append(message)
             metadata[key] = "|".join(reasons)
