@@ -314,7 +314,7 @@ def report_content(content_type, file_name):
         abort(404, "File not found")
 
     if blob.metadata is None:
-        blob.metadata = {}
+        metadata = {}
 
     for key in keys:
         if key == "report_count":
@@ -348,6 +348,8 @@ def report_content(content_type, file_name):
                 + '"}',
             },
         )
+
+    return "Report submitted successfully.", 200
 
 
 # Route that returns "418 I'm a teapot" to all requests as an easter egg
