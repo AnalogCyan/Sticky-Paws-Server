@@ -239,6 +239,7 @@ def get_characters():
 # Route to retrieve metadata for a specific content file from Google Cloud Storage
 @app.route("/metadata/<string:category>/<string:blob_name>", methods=["GET"])
 @limiter.exempt
+@require_api_key
 def get_metadata(category, blob_name):
     if category not in ["levels", "characters"]:
         return "Invalid request.", 400
@@ -272,6 +273,7 @@ def get_metadata(category, blob_name):
 # Route to download a specific content file from Google Cloud Storage
 @app.route("/download/<content_type>/<file_name>", methods=["GET"])
 @limiter.exempt
+@require_api_key
 def download_content(content_type, file_name):
     if content_type not in ["levels", "characters"]:
         abort(400, "Invalid content")
@@ -296,10 +298,12 @@ def download_content(content_type, file_name):
 # Route for reporting a content file for review
 @app.route("/report/<content_type>/<file_name>", methods=["POST"])
 @limiter.exempt
+@require_api_key
 def report_content(content_type, file_name):
     if content_type not in ["levels", "characters"]:
         abort(400, "Invalid content")
 
+    report_reason = request.form.get("report_reason", None)
     report_message = request.form.get("report_message", None)
     content_filename = f"{content_type}/{file_name}.zip"
     blob = bucket.blob(content_filename)
@@ -311,13 +315,13 @@ def report_content(content_type, file_name):
 
     for key in keys:
         if key == "report_count":
-            value = int(metadata[key])
-            value += 1
+            value = int(metadata.get(key, 0)) + 1
             metadata[key] = str(value)
-        elif key == "report_reason" and report_message is not None:
-            value = metadata[key].split("|") if key in metadata else []
-            value.append(report_message)
-            metadata[key] = "|".join(value)
+        elif key == "report_reason":
+            message = f'{report_reason}: {report_message or "No message provided."}'
+            reasons = metadata.get(key, "").split("|")
+            reasons.append(message)
+            metadata[key] = "|".join(reasons)
 
     blob.metadata = metadata
     blob.patch()
