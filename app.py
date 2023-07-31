@@ -313,6 +313,9 @@ def report_content(content_type, file_name):
     if not blob.exists():
         abort(404, "File not found")
 
+    if blob.metadata is None:
+        blob.metadata = {}
+
     for key in keys:
         if key == "report_count":
             value = int(metadata.get(key, 0)) + 1
