@@ -23,6 +23,10 @@ The following API endpoints are defined on the Flask server:
 - `/download`: Download a specified custom level/character by sending a request with the content type (level or character) and ID as parameters.
 - `/report`: Submit a report for a file that may violate our community guidelines.
 
+## Disclaimer
+
+Please be aware that this project represents a learning journey for both myself and Jonnil. As such, aspects such as the code structure, commit history, and overall organization may not conform to industry standards or best practices at all times. We strived for progress and learning over perfection in this endeavor. We appreciate your understanding and, should you find something that could be improved, we welcome constructive criticism and suggestions. Please bear with us as we continue to grow and learn in our programming journey.
+
 ## License
 
 This project is licensed under the [Apache 2.0](./LICENSE) License.
