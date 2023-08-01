@@ -1,35 +1,52 @@
+/**
+ * Loads levels by making a fetch request to "/levels" endpoint
+ * and populates a level list in the DOM.
+ *
+ * @returns {Promise<void>} A promise that resolves when the levels are loaded and displayed.
+ * @throws {Error} If the fetch request fails or an error occurs during the process.
+ */
 async function loadLevels() {
-  try {
-    const response = await fetch("/levels");
-    console.log("Fetch response:", response);
+  fetch("/levels")
+    .then((response) => {
+      console.log("Fetch response:", response);
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch levels: ${response.statusText}`);
-    }
+      if (!response.ok) {
+        throw new Error(`Failed to fetch levels: ${response.statusText}`);
+      }
 
-    const levels = await response.json();
-    console.log("Fetched levels:", levels);
-    const levelList = document.getElementById("level-list");
+      return response.json();
+    })
+    .then((levels) => {
+      console.log("Fetched levels:", levels);
+      const levelList = document.getElementById("level-list");
 
-    // Clear the existing list items
-    while (levelList.firstChild) {
-      levelList.removeChild(levelList.firstChild);
-    }
+      // Clear the existing list items
+      while (levelList.firstChild) {
+        levelList.removeChild(levelList.firstChild);
+      }
 
-    // Add the fetched levels to the list
-    for (const level of levels) {
-      const listItem = document.createElement("li");
-      listItem.textContent = `${level.name.replace(
-        "levels/",
-        ""
-      )} - Uploaded: ${level.time_created}`;
-      levelList.appendChild(listItem);
-    }
-  } catch (error) {
-    console.error("Error fetching levels:", error);
-  }
+      // Add the fetched levels to the list
+      for (const level of levels) {
+        const listItem = document.createElement("li");
+        listItem.textContent = `${level.name.replace(
+          "levels/",
+          ""
+        )} - Uploaded: ${level.time_created}`;
+        levelList.appendChild(listItem);
+      }
+    })
+    .catch((error) => {
+      console.error("Error fetching levels:", error);
+    });
 }
 
+/**
+ * Loads characters by making a fetch request to "/characters" endpoint
+ * and populates a character list in the DOM.
+ *
+ * @returns {Promise<void>} A promise that resolves when the characters are loaded and displayed.
+ * @throws {Error} If the fetch request fails or an error occurs during the process.
+ */
 async function loadCharacters() {
   try {
     const response = await fetch("/characters");
