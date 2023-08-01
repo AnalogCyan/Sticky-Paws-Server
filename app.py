@@ -3,7 +3,6 @@ import base64
 import io
 import json
 import os
-import time
 import zipfile
 
 from datetime import timezone
@@ -14,7 +13,6 @@ from flask_talisman import Talisman
 from functools import wraps
 from google.cloud import storage, secretmanager
 from io import BytesIO
-from itsdangerous import URLSafeTimedSerializer
 import requests
 
 
@@ -369,7 +367,7 @@ def teapot():
     "/print", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 )
 @limiter.exempt
-def print():
+def lp0():
     return "lp0 on fire", 500
 
 
