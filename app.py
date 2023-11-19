@@ -4,15 +4,15 @@ import io
 import json
 import os
 import zipfile
+from io import BytesIO
+from functools import wraps
 
 from datetime import timezone
 from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
-from functools import wraps
 from google.cloud import storage, secretmanager
-from io import BytesIO
 import requests
 
 
@@ -45,16 +45,6 @@ name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".forma
 response = client.access_secret_version(name=name)
 secret_value = response.payload.data.decode("UTF-8")
 API_KEY = secret_value
-
-
-# Get Mailgun API keys from Google Cloud Secret Manager
-client = secretmanager.SecretManagerServiceClient()
-name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".format(
-    project_id="236548638255", secret_name="mailgun-api-key", version_id="latest"
-)
-response = client.access_secret_version(name=name)
-secret_value = response.payload.data.decode("UTF-8")
-MAILGUN_API_KEY = secret_value
 
 
 # Decorator function to check if the client is authorized to access the API
@@ -235,9 +225,9 @@ def get_characters():
 
 
 # Route to retrieve metadata for a specific content file from Google Cloud Storage
-@app.route("/metadata/<string:category>/<string:blob_name>", methods=["GET"])
+@app.route("/metadata/<category>/<blob_name>", methods=["GET"])
 @limiter.exempt
-@require_api_key
+#@require_api_key
 def get_metadata(category, blob_name):
     if category not in ["levels", "characters"]:
         return "Invalid request.", 400
