@@ -227,7 +227,7 @@ def get_characters():
 # Route to retrieve metadata for a specific content file from Google Cloud Storage
 @app.route("/metadata/<category>/<blob_name>", methods=["GET"])
 @limiter.exempt
-#@require_api_key
+# @require_api_key
 def get_metadata(category, blob_name):
     if category not in ["levels", "characters"]:
         return "Invalid request.", 400
@@ -245,13 +245,33 @@ def get_metadata(category, blob_name):
         name = root_folder
 
         thumbnail_data = None
-        for file_name in ["thumbnail.png", "automatic_thumbnail.png"]:
-            try:
-                with zip_file.open(f"{root_folder}/{file_name}") as image_file:
-                    thumbnail_data = base64.b64encode(image_file.read()).decode("utf-8")
-                    break
-            except KeyError:
-                continue
+
+        if category == "levels":
+            for file_name in ["thumbnail.png", "automatic_thumbnail.png"]:
+                try:
+                    with zip_file.open(f"{root_folder}/{file_name}") as image_file:
+                        thumbnail_data = base64.b64encode(image_file.read()).decode(
+                            "utf-8"
+                        )
+                        break
+                except KeyError:
+                    continue
+        elif category == "characters":
+            for file_name in [
+                "thumbnail.png",
+                "sprites/character_select_portrait.png",
+                "sprites/stand.png",
+                "sprites/skin0/character_select_portrait.png",
+                "sprites/skin0/stand.png",
+            ]:
+                try:
+                    with zip_file.open(f"{root_folder}/{file_name}") as image_file:
+                        thumbnail_data = base64.b64encode(image_file.read()).decode(
+                            "utf-8"
+                        )
+                        break
+                except KeyError:
+                    continue
         if thumbnail_data is None:
             raise Exception("Invalid file structure.")
 
