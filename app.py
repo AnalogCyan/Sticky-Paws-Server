@@ -7,6 +7,7 @@ import zipfile
 from io import BytesIO
 from functools import wraps
 
+from PIL import Image, ImageDraw, ImageFont
 from datetime import timezone
 from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_limiter import Limiter
@@ -14,6 +15,9 @@ from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from google.cloud import storage, secretmanager
 import requests
+
+from configparser import ConfigParser
+from io import StringIO
 
 
 # Initialize Flask application
@@ -131,6 +135,85 @@ def allowed_filename(filename):
     return filename.isalnum() and len(filename) == 9
 
 
+# Helper function to ensure text is wrapped correctly
+def smart_wrap(text, width):
+    """Custom wrap function that avoids breaking short words where possible"""
+    words = text.split()
+    lines = []
+    current_line = []
+
+    for word in words:
+        test_line = " ".join(current_line + [word])
+        if len(test_line) <= width:
+            current_line.append(word)
+        else:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return "\n".join(lines)
+
+
+# Helper function to convert text to image
+def text_to_image(text):
+    # Size of the image
+    image_width = 320
+    image_height = 240
+
+    # Create a new image with a dark gray background
+    image = Image.new("RGB", (image_width, image_height), (50, 50, 50))
+    draw = ImageDraw.Draw(image)
+
+    # Define initial font and size
+    initial_font_size = 20  # Start with a reasonable size for clarity
+    font_path = "Arial.ttf"
+
+    try:
+        font = ImageFont.truetype(font_path, initial_font_size)
+    except IOError:
+        print("Defaulting to load_default() because Arial.ttf could not be loaded.")
+        font = ImageFont.load_default()
+
+    # Estimate maximum characters in a single line based on the letter 'W'
+    max_char_in_line = image_width // (font.getbbox("W")[2] - font.getbbox("W")[0])
+    wrapped_text = smart_wrap(text, max_char_in_line)
+    lines = wrapped_text.split("\n")
+
+    # Adjusting font size if the total text height exceeds the image height
+    max_attempts = 5
+    attempt = 0
+    total_text_height = sum(font.getbbox(line)[3] for line in lines)
+
+    while (
+        total_text_height > image_height
+        and initial_font_size > 10
+        and attempt < max_attempts
+    ):
+        initial_font_size -= 1
+        font = (
+            ImageFont.truetype(font_path, initial_font_size)
+            if font_path
+            else ImageFont.load_default()
+        )
+        wrapped_text = smart_wrap(text, max_char_in_line)
+        lines = wrapped_text.split("\n")
+        total_text_height = sum(font.getbbox(line)[3] for line in lines)
+        attempt += 1
+
+    # Drawing text
+    y = (image_height - total_text_height) // 2
+    for line in lines:
+        line_width = font.getbbox(line)[2]
+        x = (image_width - line_width) // 2
+        draw.text((x, y), line, font=font, fill="white")
+        y += font.getbbox(line)[3]
+
+    # Return the image
+    return image
+
+
 # Initialize Google Cloud Storage client
 storage_client = storage.Client()
 bucket_name = "sticky-paws.appspot.com"
@@ -229,6 +312,9 @@ def get_characters():
 @limiter.exempt
 # @require_api_key
 def get_metadata(category, blob_name):
+    os_type = request.args.get("os_type", "os_unknown").lower()
+    print(str(os_type))
+
     if category not in ["levels", "characters"]:
         return "Invalid request.", 400
 
@@ -243,7 +329,7 @@ def get_metadata(category, blob_name):
     with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zip_file:
         root_folder = zip_file.namelist()[0].split("/")[0]
         name = root_folder
-
+        photographic = False
         thumbnail_data = None
 
         if category == "levels":
@@ -256,6 +342,32 @@ def get_metadata(category, blob_name):
                         break
                 except KeyError:
                     continue
+            if str(os_type) == "21":
+                for file_name in ["level_information.ini"]:
+                    with zip_file.open(f"{root_folder}/data/{file_name}") as ini_file:
+                        ini_data = ini_file.read().decode("utf-8")
+                        config = ConfigParser()
+                        config.read_string(ini_data)
+
+                    if config.has_option(
+                        "Custom Backgrounds",
+                        "thumbnail_uses_photographic_image",
+                    ):
+                        if (
+                            config.get(
+                                "Custom Backgrounds",
+                                "thumbnail_uses_photographic_image",
+                            )
+                            == '"1.000000"'
+                        ) and str(os_type) == "21":
+                            photographic = True
+                            break
+            if photographic or thumbnail_data is None:
+                img_byte_arr = BytesIO()
+                text_to_image(name).save(img_byte_arr, format="PNG")
+                thumbnail_data = base64.b64encode(img_byte_arr.getvalue()).decode(
+                    "utf-8"
+                )
         elif category == "characters":
             for file_name in [
                 "thumbnail.png",
@@ -272,8 +384,6 @@ def get_metadata(category, blob_name):
                         break
                 except KeyError:
                     continue
-        if thumbnail_data is None:
-            raise Exception("Invalid file structure.")
 
     return json.dumps({"name": name, "thumbnail": thumbnail_data})
 
