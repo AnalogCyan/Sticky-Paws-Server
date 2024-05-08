@@ -10,6 +10,8 @@ The following functions are defined on the Flask server:
 - `allowed_size()`: Checks the size of uploaded files, ensuring they adhere to the defined size limit to maintain server efficiency.
 - `verify_file()`: Verifies the integrity and format of uploaded files for proper game execution and to prevent any damage.
 - `allowed_filename()`: Validates the filenames of uploaded files to maintain consistency and prevent potential file errors.
+- `smart_wrap()`: Ensures that text is wrapped correctly to avoid breaking short words where possible.
+- `text_to_image()`: Converts text to an image for missing thumbnails and photographic content on Nintendo Switch.
 
 ## API Endpoints
 
