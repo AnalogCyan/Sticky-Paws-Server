@@ -465,6 +465,7 @@ def report_content(content_type, file_name):
                 + console_url
                 + '"}',
             },
+            timeout=30,
         )
 
     return "Report submitted successfully.", 200
