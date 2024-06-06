@@ -214,6 +214,24 @@ def text_to_image(text):
     return image
 
 
+# Helper function to check if blob is unlisted
+def check_unlisted(blob):
+    level_unlisted = False
+    zip_bytes = blob.download_as_bytes()
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zip_file:
+        root_folder = zip_file.namelist()[0].split("/")[0]
+        for file_name in ["level_information.ini"]:
+            with zip_file.open(f"{root_folder}/data/{file_name}") as ini_file:
+                ini_data = ini_file.read().decode("utf-8")
+                config = ConfigParser()
+                config.read_string(ini_data)
+            if config.has_option("info", "visibility_index"):
+                if (config.get("info", "visibility_index")) == '"1.000000"':
+                    level_unlisted = True
+                    break
+    return level_unlisted
+
+
 # Initialize Google Cloud Storage client
 storage_client = storage.Client()
 bucket_name = "sticky-paws.appspot.com"
@@ -254,6 +272,8 @@ def upload_level():
 
     blob = bucket.blob(content_filename)
     blob.upload_from_string(content_data, content_type="application/zip")
+    if blob.metadata is None:
+        blob.metadata = {}
     blob.metadata["Uploaded-By"] = (
         request.access_route[0] if request.access_route else request.remote_addr
     )
@@ -275,7 +295,9 @@ def get_levels():
             ),
         }
         for blob in blobs
-        if blob.name.startswith("levels/") and blob.name.endswith(".zip")
+        if blob.name.startswith("levels/")
+        and blob.name.endswith(".zip")
+        and not check_unlisted(blob)
     ]
 
     sorted_levels = sorted(levels, key=lambda x: x["time_created"], reverse=True)
