@@ -12,6 +12,7 @@ The following functions are defined on the Flask server:
 - `allowed_filename()`: Validates the filenames of uploaded files to maintain consistency and prevent potential file errors.
 - `smart_wrap()`: Ensures that text is wrapped correctly to avoid breaking short words where possible.
 - `text_to_image()`: Converts text to an image for missing thumbnails and photographic content on Nintendo Switch.
+- `check_unlisted()`: Checks if an uploaded file is unlisted on the server.
 
 ## API Endpoints
 
