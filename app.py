@@ -8,7 +8,7 @@ from io import BytesIO
 from functools import wraps
 
 from PIL import Image, ImageDraw, ImageFont
-from datetime import timezone
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -491,6 +491,35 @@ def report_content(content_type, file_name):
         )
 
     return "Report submitted successfully.", 200
+
+
+# Route for fetching how many levels and characters were uploaded today
+@app.route("/today", methods=["GET"])
+@limiter.exempt
+def today():
+    today = datetime.now(timezone.utc).date()
+
+    # Function to count blobs uploaded today for a given prefix
+    def count_blobs_uploaded_today(prefix, exclude_unlisted=False):
+        blobs = bucket.list_blobs(prefix=prefix)
+        count = 0
+        for blob in blobs:
+            if blob.time_created.date() == today:
+                if exclude_unlisted and check_unlisted(blob):
+                    continue
+                count += 1
+        return count
+
+    # Get counts for each prefix
+    levels_uploaded_today = count_blobs_uploaded_today("levels/", exclude_unlisted=True)
+    characters_uploaded_today = count_blobs_uploaded_today("characters/")
+
+    return jsonify(
+        {
+            "levels_uploaded_today": levels_uploaded_today,
+            "characters_uploaded_today": characters_uploaded_today,
+        }
+    )
 
 
 # Route that returns "418 I'm a teapot" to all requests as an easter egg

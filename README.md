@@ -24,6 +24,7 @@ The following API endpoints are defined on the Flask server:
 - `/metadata`: Retrieve metadata for a specified file, including name and thumbnail.
 - `/download`: Download a specified custom level/character by sending a request with the content type (level or character) and ID as parameters.
 - `/report`: Submit a report for a file that may violate our community guidelines.
+- `/today`: Retrieve how many levels/characters were uploaded today (UTC, this may change).
 
 ## Disclaimer
 
