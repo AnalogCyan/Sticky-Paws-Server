@@ -4,5 +4,8 @@ Flask-Talisman
 google-cloud-storage
 google-cloud-secret-manager
 itsdangerous
+cryptography
 requests
 pillow
+pyjwt
+tenacity

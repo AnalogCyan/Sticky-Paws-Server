@@ -7,7 +7,7 @@ import zipfile
 from io import BytesIO
 from functools import wraps
 
-from PIL import Image, ImageDraw, ImageFont
+from configparser import ConfigParser
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_limiter import Limiter
@@ -16,8 +16,24 @@ from flask_talisman import Talisman
 from google.cloud import storage, secretmanager
 import requests
 
-from configparser import ConfigParser
 from io import StringIO
+from PIL import Image, ImageDraw, ImageFont
+import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.x509 import load_pem_x509_certificate
+
+# Import tenacity for retry logic
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+
+
+# Define a custom exception for retryable errors
+class KeyFetchError(Exception):
+    pass
 
 
 # Initialize Flask application
@@ -49,6 +65,14 @@ name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".forma
 response = client.access_secret_version(name=name)
 secret_value = response.payload.data.decode("UTF-8")
 API_KEY = secret_value
+
+# Define variables for Nintendo
+ISSUER = "https://e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com"
+JWKS_URI = (
+    "https://e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com/1.0.0/certificates"
+)
+APPLICATION_ID = "01004b9000490000"
+ALGORITHM = "RS256"
 
 
 # Decorator function to check if the client is authorized to access the API
@@ -230,6 +254,41 @@ def check_unlisted(blob):
                     level_unlisted = True
                     break
     return level_unlisted
+
+
+# Helper function to get JWKS from Nintendo with retry logic
+@retry(
+    stop=stop_after_attempt(5),  # Retry up to 5 times
+    wait=wait_exponential(multiplier=1, min=2, max=10),  # Exponential backoff
+    retry=retry_if_exception_type(KeyFetchError),  # Retry only on KeyFetchError
+)
+def get_jwks_with_retry(jwks_uri):
+    try:
+        response = requests.get(jwks_uri)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        raise KeyFetchError(f"Failed to fetch JWKS: {e}")
+
+
+# Helper function to get public key from JWKS with retry logic
+def public_key(jwks_uri, kid):
+    try:
+        jwks = get_jwks_with_retry(jwks_uri)
+        keys = jwks["keys"]
+        jwk = next((k for k in keys if k["kid"] == kid), None)
+        if jwk:
+            cert_str = jwk["x5c"][0]
+            pem_cert = (
+                f"-----BEGIN CERTIFICATE-----\n{cert_str}\n-----END CERTIFICATE-----"
+            )
+            cert_obj = load_pem_x509_certificate(pem_cert.encode())
+            return cert_obj.public_key()
+        else:
+            raise KeyFetchError(f"Key with kid {kid} not found in JWKS")
+    except KeyFetchError as e:
+        print(f"Error fetching public key: {e}")
+        return None
 
 
 # Initialize Google Cloud Storage client
@@ -520,6 +579,71 @@ def today():
             "characters_uploaded_today": characters_uploaded_today,
         }
     )
+
+
+# Route for Nintendo Switch token validation
+@app.route("/validate_token", methods=["GET"])
+@limiter.exempt
+def validate_token():
+    id_token = request.args.get("id_token")
+    if not id_token:
+        return jsonify({"error": "Missing id_token"}), 400
+
+    try:
+        # Decode without verification to get headers
+        unverified_header = jwt.get_unverified_header(id_token)
+
+        # Validate the algorithm
+        if unverified_header["alg"] != ALGORITHM:
+            return jsonify({"error": "Invalid algorithm"}), 400
+
+        # Validate the jku
+        if unverified_header.get("jku") != JWKS_URI:
+            return jsonify({"error": "Invalid jku"}), 400
+
+        # Retrieve the public key
+        key = public_key(JWKS_URI, unverified_header["kid"])
+        if not key:
+            return jsonify({"error": "Public key not found"}), 400
+
+        # Decode and validate the JWT
+        payload = jwt.decode(
+            id_token,
+            key,
+            algorithms=[ALGORITHM],
+            issuer=ISSUER,
+            options={
+                "verify_aud": False,  # Disable audience verification
+                "verify_exp": False,  # Disable expiration verification
+            },
+        )
+
+        # Validate 'iat' and 'exp'
+        if payload["iat"] > payload["exp"]:
+            return jsonify({"error": "Invalid 'iat' and 'exp' values"}), 400
+
+        # Validate nintendo.ai value
+        nintendo = payload["nintendo"]
+        if nintendo["ai"].lower() != APPLICATION_ID.lower():
+            return jsonify({"error": "Invalid Nintendo AI value"}), 400
+
+        return payload, 200
+
+    except jwt.ExpiredSignatureError as e:
+        print(f"Token expired: {e}")
+        return jsonify({"error": "Token has expired"}), 400
+    except jwt.InvalidAudienceError as e:
+        print(f"Invalid audience: {e}")
+        return jsonify({"error": "Audience doesn't match"}), 400
+    except jwt.InvalidIssuerError as e:
+        print(f"Invalid issuer: {e}")
+        return jsonify({"error": "Issuer doesn't match"}), 400
+    except jwt.InvalidTokenError as e:
+        print(f"Invalid token: {e}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return jsonify({"error": "An unexpected error occurred"}), 500
 
 
 # Route that returns "418 I'm a teapot" to all requests as an easter egg
