@@ -1,12 +1,6 @@
-# Import required libraries
-import base64
-import io
-import json
-import os
-import zipfile
-from io import BytesIO
+import base64, io, json, os, zipfile, jwt
+from io import BytesIO, StringIO
 from functools import wraps
-
 from configparser import ConfigParser
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory, abort
@@ -15,14 +9,9 @@ from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from google.cloud import storage, secretmanager
 import requests
-
-from io import StringIO
 from PIL import Image, ImageDraw, ImageFont
-import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509 import load_pem_x509_certificate
-
-# Import tenacity for retry logic
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -30,13 +19,30 @@ from tenacity import (
     retry_if_exception_type,
 )
 
+# Dictionary of Nintendo endpoints
+NINTENDO_ENDPOINTS = {
+    "jd1": "https://d78dbb1c550d43c6af49bf0465cbc094-sb.baas.nintendo.com",
+    "dd1": "https://e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com",
+    "dp1": "https://d9c8ea0e17f68dbeab8674c59f6fbada-sb.baas.nintendo.com",
+    "sd1": "https://96130dc40283b737c07719e6c9514de-sb.baas.nintendo.com",
+    "sp1": "https://dc219b6b3aa8e06873733fd1af0e03-sb.baas.nintendo.com",
+    "lp1": "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com",
+}
 
-# Define a custom exception for retryable errors
+
+# Get the Nintendo endpoint based on a key
+def get_nintendo_endpoint(endpoint_key):
+    return (
+        NINTENDO_ENDPOINTS[endpoint_key] if endpoint_key in NINTENDO_ENDPOINTS else None
+    )
+
+
+# Custom exception for key fetching errors
 class KeyFetchError(Exception):
     pass
 
 
-# Initialize Flask application
+# Flask application initialization
 app = Flask(__name__)
 app.config.update(
     dict(
@@ -47,7 +53,7 @@ app.config.update(
     )
 )
 
-# Initialize Flask plugins
+# Set up rate limiter
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -55,280 +61,224 @@ limiter = Limiter(
     storage_uri="memory://",
     strategy="moving-window",
 )
+
+# Add security headers using Talisman
 Talisman(app)
 
-# Get Server API key from Google Cloud Secret Manager
-client = secretmanager.SecretManagerServiceClient()
-name = "projects/{project_id}/secrets/{secret_name}/versions/{version_id}".format(
-    project_id="236548638255", secret_name="server-api-key", version_id="latest"
+# Google Cloud Secret Manager to retrieve API key
+secret_manager_client = secretmanager.SecretManagerServiceClient()
+secret_name = "projects/{}/secrets/{}/versions/{}".format(
+    "236548638255", "server-api-key", "latest"
 )
-response = client.access_secret_version(name=name)
-secret_value = response.payload.data.decode("UTF-8")
-API_KEY = secret_value
+secret_response = secret_manager_client.access_secret_version(name=secret_name)
+API_KEY = secret_response.payload.data.decode("UTF-8")
 
-# Define variables for Nintendo
-ISSUER = "https://e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com"
-JWKS_URI = (
-    "https://e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com/1.0.0/certificates"
-)
-APPLICATION_ID = "01004b9000490000"
+# JWT settings
+ISSUER = get_nintendo_endpoint("dd1")
+JWKS_URI = f"{ISSUER}/1.0.0/certificates"
+APPLICATION_IDS = ["01004b9000490000", "0100c8201aa36000"]
 ALGORITHM = "RS256"
 
 
-# Decorator function to check if the client is authorized to access the API
-def require_api_key(view_function):
-    @wraps(view_function)
+# Decorator to enforce API key requirement
+def require_api_key(func):
+    @wraps(func)
     def decorated_function(*args, **kwargs):
         if request.headers.get("X-API-Key") != API_KEY:
-            return "Unauthorized", 401
-        return view_function(*args, **kwargs)
+            return ("Unauthorized", 401)
+        return func(*args, **kwargs)
 
     return decorated_function
 
 
-# Helper function to check if a file's size is within allowed limit
-def allowed_size(file, max_size=32):
-    # Check if file is a file-like object
-    if not hasattr(file, "read") or not hasattr(file, "seek"):
+# Check if file size is within allowed limit
+def allowed_file_size(file_object, max_size_mb=32):
+    if not hasattr(file_object, "read") or not hasattr(file_object, "seek"):
         raise ValueError("The 'file' parameter must be a file-like object")
-
-    # Store current file position
-    current_position = file.tell()
-
-    # Go to the end of the file
-    file.seek(0, 2)  # 2 means 'relative to the end of file'
-
-    # Get the size in bytes
-    size_in_bytes = file.tell()
-
-    # Restore original file position
-    file.seek(current_position)
-
-    # Convert size to megabytes (1 MB = 1024 * 1024 bytes)
-    size_in_megabytes = size_in_bytes / 1048576.0
-
-    # Check if the size is within the allowed limit
-    return size_in_megabytes <= max_size
+    current_position = file_object.tell()
+    file_object.seek(0, 2)
+    file_size = file_object.tell()
+    file_object.seek(current_position)
+    return file_size / 1048576.0 <= max_size_mb
 
 
-# Helper function to verify the uploaded file content
-def verify_file(content_type, content_data):
+# Verify the content of uploaded files
+def verify_file_content(file_type, file_data):
     try:
-        with zipfile.ZipFile(io.BytesIO(content_data), "r") as zip_ref:
-            if content_type == "levels":
-                required_files = {"level_information.ini"}
-                thumbnail_files = {"thumbnail.png", "automatic_thumbnail.png"}
-                object_placement_files = {
-                    "object_placement_all.json",
-                    "object_placement_all.txt",
-                }
-            elif content_type == "characters":
-                required_files = {"character_config.ini"}
-                thumbnail_files = set()
-                object_placement_files = set()
-
-            # Check if all required files are present in the uploaded zip file
-            zip_files_no_folder = {file.split("/")[-1] for file in zip_ref.namelist()}
-
-            if not required_files.issubset(zip_files_no_folder):
-                return False
-
-            # Check if at least one thumbnail file is present for the "levels" content type
-            if content_type == "levels":
-                if not thumbnail_files.intersection(zip_files_no_folder):
-                    return False
-
-                # Check if at least one object placement file is present
-                if not object_placement_files.intersection(zip_files_no_folder):
-                    return False
-
-            # Add more file-specific validations here if needed
-
-            return True
+        with zipfile.ZipFile(io.BytesIO(file_data), "r") as zip_file:
+            # Determine required files based on file type
+            required_files = (
+                {"level_information.ini"}
+                if file_type == "levels"
+                else {"character_config.ini"} if file_type == "characters" else set()
+            )
+            thumbnail_files = (
+                {"thumbnail.png", "automatic_thumbnail.png"}
+                if file_type == "levels"
+                else set()
+            )
+            object_files = (
+                {"object_placement_all.json", "object_placement_all.txt"}
+                if file_type == "levels"
+                else set()
+            )
+            zip_file_names = {os.path.basename(file) for file in zip_file.namelist()}
+            # Check if all required files are present
+            return required_files.issubset(zip_file_names) and (
+                not file_type == "levels"
+                or thumbnail_files.intersection(zip_file_names)
+                and object_files.intersection(zip_file_names)
+            )
     except zipfile.BadZipFile:
-        # If the uploaded file is not a valid zip file, return False
         return False
 
 
-# Helper function to check if filename is valid
-def allowed_filename(filename):
-    # Strip the .zip extension from the filename
-    if filename.endswith(".zip"):
-        filename = filename[:-4]
+# Check if the filename is valid
+def is_valid_filename(filename):
+    return (
+        filename[:-4].isalnum() and len(filename[:-4]) == 9
+        if filename.endswith(".zip")
+        else filename.isalnum() and len(filename) == 9
+    )
 
-    return filename.isalnum() and len(filename) == 9
 
-
-# Helper function to ensure text is wrapped correctly
-def smart_wrap(text, width):
-    """Custom wrap function that avoids breaking short words where possible"""
+# Smartly wrap text to fit within a given width
+def smart_wrap_text(text, max_width):
     words = text.split()
     lines = []
     current_line = []
-
     for word in words:
         test_line = " ".join(current_line + [word])
-        if len(test_line) <= width:
+        if len(test_line) <= max_width:
             current_line.append(word)
         else:
             lines.append(" ".join(current_line))
             current_line = [word]
-
     if current_line:
         lines.append(" ".join(current_line))
-
     return "\n".join(lines)
 
 
-# Helper function to convert text to image
-def text_to_image(text):
-    # Size of the image
-    image_width = 320
-    image_height = 240
-
-    # Create a new image with a dark gray background
+# Generate an image from the given text
+def generate_text_image(text):
+    image_width, image_height = 320, 240
     image = Image.new("RGB", (image_width, image_height), (50, 50, 50))
     draw = ImageDraw.Draw(image)
-
-    # Define initial font and size
-    initial_font_size = 20  # Start with a reasonable size for clarity
+    font_size = 20
     font_path = "Arial.ttf"
-
     try:
-        font = ImageFont.truetype(font_path, initial_font_size)
-    except IOError:
-        print("Defaulting to load_default() because Arial.ttf could not be loaded.")
+        font = ImageFont.truetype(font_path, font_size)
+    except:
         font = ImageFont.load_default()
-
-    # Estimate maximum characters in a single line based on the letter 'W'
-    max_char_in_line = image_width // (font.getbbox("W")[2] - font.getbbox("W")[0])
-    wrapped_text = smart_wrap(text, max_char_in_line)
+    max_chars_per_line = image_width // (font.getbbox("W")[2] - font.getbbox("W")[0])
+    wrapped_text = smart_wrap_text(text, max_chars_per_line)
     lines = wrapped_text.split("\n")
-
-    # Adjusting font size if the total text height exceeds the image height
     max_attempts = 5
-    attempt = 0
-    total_text_height = sum(font.getbbox(line)[3] for line in lines)
-
+    attempt_count = 0
+    text_height = sum(font.getbbox(line)[3] for line in lines)
+    # Reduce font size if text exceeds image height
     while (
-        total_text_height > image_height
-        and initial_font_size > 10
-        and attempt < max_attempts
+        text_height > image_height and font_size > 10 and attempt_count < max_attempts
     ):
-        initial_font_size -= 1
+        font_size -= 1
         font = (
-            ImageFont.truetype(font_path, initial_font_size)
+            ImageFont.truetype(font_path, font_size)
             if font_path
             else ImageFont.load_default()
         )
-        wrapped_text = smart_wrap(text, max_char_in_line)
+        wrapped_text = smart_wrap_text(text, max_chars_per_line)
         lines = wrapped_text.split("\n")
-        total_text_height = sum(font.getbbox(line)[3] for line in lines)
-        attempt += 1
-
-    # Drawing text
-    y = (image_height - total_text_height) // 2
+        text_height = sum(font.getbbox(line)[3] for line in lines)
+        attempt_count += 1
+    y_position = (image_height - text_height) // 2
     for line in lines:
         line_width = font.getbbox(line)[2]
-        x = (image_width - line_width) // 2
-        draw.text((x, y), line, font=font, fill="white")
-        y += font.getbbox(line)[3]
-
-    # Return the image
+        x_position = (image_width - line_width) // 2
+        draw.text((x_position, y_position), line, font=font, fill="white")
+        y_position += font.getbbox(line)[3]
     return image
 
 
-# Helper function to check if blob is unlisted
-def check_unlisted(blob):
-    level_unlisted = False
-    zip_bytes = blob.download_as_bytes()
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zip_file:
+# Check if a level is unlisted based on metadata
+def is_unlisted(blob):
+    unlisted = False
+    with zipfile.ZipFile(io.BytesIO(blob.download_as_bytes()), "r") as zip_file:
         root_folder = zip_file.namelist()[0].split("/")[0]
-        for file_name in ["level_information.ini"]:
-            with zip_file.open(f"{root_folder}/data/{file_name}") as ini_file:
-                ini_data = ini_file.read().decode("utf-8")
-                config = ConfigParser()
-                config.read_string(ini_data)
-            if config.has_option("info", "visibility_index"):
-                if (config.get("info", "visibility_index")) == '"1.000000"':
-                    level_unlisted = True
-                    break
-    return level_unlisted
+        with zip_file.open(f"{root_folder}/data/level_information.ini") as file:
+            config = ConfigParser()
+            config.read_string(file.read().decode("utf-8"))
+            if (
+                config.has_option("info", "visibility_index")
+                and config.get("info", "visibility_index") == '"1.000000"'
+            ):
+                unlisted = True
+    return unlisted
 
 
-# Helper function to get JWKS from Nintendo with retry logic
+# Retry mechanism to fetch JWKS with exponential backoff
 @retry(
-    stop=stop_after_attempt(5),  # Retry up to 5 times
-    wait=wait_exponential(multiplier=1, min=2, max=10),  # Exponential backoff
-    retry=retry_if_exception_type(KeyFetchError),  # Retry only on KeyFetchError
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(KeyFetchError),
 )
 def get_jwks_with_retry(jwks_uri):
     try:
         response = requests.get(jwks_uri)
         response.raise_for_status()
         return response.json()
-    except requests.RequestException as e:
-        raise KeyFetchError(f"Failed to fetch JWKS: {e}")
+    except requests.RequestException as error:
+        raise KeyFetchError(f"Failed to fetch JWKS: {error}")
 
 
-# Helper function to get public key from JWKS with retry logic
-def public_key(jwks_uri, kid):
+# Fetch the public key from JWKS endpoint
+def fetch_public_key(jwks_uri, key_id):
     try:
         jwks = get_jwks_with_retry(jwks_uri)
         keys = jwks["keys"]
-        jwk = next((k for k in keys if k["kid"] == kid), None)
-        if jwk:
-            cert_str = jwk["x5c"][0]
-            pem_cert = (
-                f"-----BEGIN CERTIFICATE-----\n{cert_str}\n-----END CERTIFICATE-----"
+        jwt_key = next((key for key in keys if key["kid"] == key_id), None)
+        if jwt_key:
+            certificate = jwt_key["x5c"][0]
+            pem_certificate = (
+                f"-----BEGIN CERTIFICATE-----\n{certificate}\n-----END CERTIFICATE-----"
             )
-            cert_obj = load_pem_x509_certificate(pem_cert.encode())
-            return cert_obj.public_key()
+            return load_pem_x509_certificate(pem_certificate.encode()).public_key()
         else:
-            raise KeyFetchError(f"Key with kid {kid} not found in JWKS")
-    except KeyFetchError as e:
-        print(f"Error fetching public key: {e}")
+            raise KeyFetchError(f"Key with kid {key_id} not found in JWKS")
+    except KeyFetchError as error:
+        print(f"Error fetching public key: {error}")
         return None
 
 
-# Initialize Google Cloud Storage client
+# Initialize Google Cloud Storage client and bucket
 storage_client = storage.Client()
 bucket_name = "sticky-paws.appspot.com"
 bucket = storage_client.get_bucket(bucket_name)
 
 
-# Route to serve static files (HTML, CSS, JS, etc.)
+# Serve static files from the 'static' directory
 @app.route("/", defaults={"path": "index.html"})
 @app.route("/<path:path>")
 @limiter.exempt
-def serve_static(path):
+def serve_static_files(path):
     return send_from_directory("static", path)
 
 
-# Route for uploading a new content file to Google Cloud Storage
+# Handle file upload requests
 @app.route("/upload", methods=["POST"])
 @limiter.exempt
 @require_api_key
-def upload_level():
-    if not allowed_filename(str(request.form["name"])):
+def upload_content():
+    if not is_valid_filename(str(request.form["name"])):
         abort(400, "Invalid filename")
-
-    content_data_base64 = request.form["data"]
-    content_data = base64.b64decode(content_data_base64)
+    content_data = base64.b64decode(request.form["data"])
     content_type = request.form["content_type"]
-
     if content_type not in ["levels", "characters"]:
         return "Invalid content", 400
-
-    max_allowed_size_in_megabytes = 32
-    if not allowed_size(BytesIO(content_data), max_allowed_size_in_megabytes):
+    if not allowed_file_size(BytesIO(content_data), 32):
         return "Payload Too Large", 413
-
-    content_filename = f"{content_type}" + "/" + request.form["name"]
-
-    if not verify_file(content_type, content_data):
+    content_filename = f"{content_type}/" + request.form["name"]
+    if not verify_file_content(content_type, content_data):
         return "Unsupported Media Type", 415
-
     blob = bucket.blob(content_filename)
     blob.upload_from_string(content_data, content_type="application/zip")
     if blob.metadata is None:
@@ -336,17 +286,15 @@ def upload_level():
     blob.metadata["Uploaded-By"] = (
         request.access_route[0] if request.access_route else request.remote_addr
     )
-
     return f"{content_type[:-1].capitalize()} uploaded successfully", 200
 
 
-# Route for retrieving a list of available levels from Google Cloud Storage
+# Retrieve the list of uploaded levels
 @app.route("/levels", methods=["GET"])
 @limiter.exempt
 def get_levels():
     blobs = bucket.list_blobs()
-
-    levels = [
+    level_list = [
         {
             "name": blob.name,
             "time_created": blob.time_created.astimezone(timezone.utc).strftime(
@@ -356,21 +304,20 @@ def get_levels():
         for blob in blobs
         if blob.name.startswith("levels/")
         and blob.name.endswith(".zip")
-        and not check_unlisted(blob)
+        and not is_unlisted(blob)
     ]
+    return (
+        jsonify(sorted(level_list, key=lambda x: x["time_created"], reverse=True)),
+        200,
+    )
 
-    sorted_levels = sorted(levels, key=lambda x: x["time_created"], reverse=True)
 
-    return jsonify(sorted_levels), 200
-
-
-# Route for retrieving a list of available characters from Google Cloud Storage
+# Retrieve the list of uploaded characters
 @app.route("/characters", methods=["GET"])
 @limiter.exempt
 def get_characters():
     blobs = bucket.list_blobs()
-
-    characters = [
+    character_list = [
         {
             "name": blob.name,
             "time_created": blob.time_created.astimezone(timezone.utc).strftime(
@@ -380,77 +327,66 @@ def get_characters():
         for blob in blobs
         if blob.name.startswith("characters/") and blob.name.endswith(".zip")
     ]
-
-    sorted_characters = sorted(
-        characters, key=lambda x: x["time_created"], reverse=True
+    return (
+        jsonify(sorted(character_list, key=lambda x: x["time_created"], reverse=True)),
+        200,
     )
 
-    return jsonify(sorted_characters), 200
 
-
-# Route to retrieve metadata for a specific content file from Google Cloud Storage
+# Retrieve metadata for a specific level or character
 @app.route("/metadata/<category>/<blob_name>", methods=["GET"])
 @limiter.exempt
-# @require_api_key
 def get_metadata(category, blob_name):
     os_type = request.args.get("os_type", "os_unknown").lower()
-    print(str(os_type))
-
     if category not in ["levels", "characters"]:
         return "Invalid request.", 400
-
-    if not allowed_filename(blob_name):
+    if not is_valid_filename(blob_name):
         abort(400, "Invalid file")
-
-    blob_name = f"{category}/{blob_name}.zip"
-
-    blob = bucket.get_blob(blob_name)
-    zip_bytes = blob.download_as_bytes()
-
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zip_file:
+    blob_full_name = f"{category}/{blob_name}.zip"
+    blob = bucket.get_blob(blob_full_name)
+    blob_data = blob.download_as_bytes()
+    with zipfile.ZipFile(io.BytesIO(blob_data), "r") as zip_file:
         root_folder = zip_file.namelist()[0].split("/")[0]
         name = root_folder
-        photographic = False
+        placeholder_thumbnail = False
         thumbnail_data = None
-
+        # Handle metadata for levels
         if category == "levels":
-            for file_name in ["thumbnail.png", "automatic_thumbnail.png"]:
+            for filename in ["thumbnail.png", "automatic_thumbnail.png"]:
                 try:
-                    with zip_file.open(f"{root_folder}/{file_name}") as image_file:
-                        thumbnail_data = base64.b64encode(image_file.read()).decode(
-                            "utf-8"
-                        )
+                    with zip_file.open(f"{root_folder}/{filename}") as file:
+                        thumbnail_data = base64.b64encode(file.read()).decode("utf-8")
                         break
                 except KeyError:
                     continue
             if str(os_type) == "21":
-                for file_name in ["level_information.ini"]:
-                    with zip_file.open(f"{root_folder}/data/{file_name}") as ini_file:
-                        ini_data = ini_file.read().decode("utf-8")
+                for filename in ["level_information.ini"]:
+                    with zip_file.open(f"{root_folder}/data/{filename}") as file:
                         config = ConfigParser()
-                        config.read_string(ini_data)
-
-                    if config.has_option(
-                        "Custom Backgrounds",
-                        "thumbnail_uses_photographic_image",
-                    ):
+                        config.read_string(file.read().decode("utf-8"))
                         if (
-                            config.get(
+                            config.has_option(
+                                "Custom Backgrounds",
+                                "thumbnail_uses_photographic_image",
+                            )
+                            and config.get(
                                 "Custom Backgrounds",
                                 "thumbnail_uses_photographic_image",
                             )
                             == '"1.000000"'
-                        ) and str(os_type) == "21":
-                            photographic = True
+                            and str(os_type) == "21"
+                        ):
+                            placeholder_thumbnail = True
                             break
-            if photographic or thumbnail_data is None:
-                img_byte_arr = BytesIO()
-                text_to_image(name).save(img_byte_arr, format="PNG")
-                thumbnail_data = base64.b64encode(img_byte_arr.getvalue()).decode(
+            if placeholder_thumbnail or thumbnail_data is None:
+                image_bytes = BytesIO()
+                generate_text_image(name).save(image_bytes, format="PNG")
+                thumbnail_data = base64.b64encode(image_bytes.getvalue()).decode(
                     "utf-8"
                 )
+        # Handle metadata for characters
         elif category == "characters":
-            for file_name in [
+            for filename in [
                 "thumbnail.png",
                 "sprites/character_select_portrait.png",
                 "sprites/stand.png",
@@ -458,195 +394,148 @@ def get_metadata(category, blob_name):
                 "sprites/skin0/stand.png",
             ]:
                 try:
-                    with zip_file.open(f"{root_folder}/{file_name}") as image_file:
-                        thumbnail_data = base64.b64encode(image_file.read()).decode(
-                            "utf-8"
-                        )
+                    with zip_file.open(f"{root_folder}/{filename}") as file:
+                        thumbnail_data = base64.b64encode(file.read()).decode("utf-8")
                         break
                 except KeyError:
                     continue
-
     return json.dumps({"name": name, "thumbnail": thumbnail_data})
 
 
-# Route to download a specific content file from Google Cloud Storage
+# Download specific content
 @app.route("/download/<content_type>/<file_name>", methods=["GET"])
 @limiter.exempt
 @require_api_key
 def download_content(content_type, file_name):
     if content_type not in ["levels", "characters"]:
         abort(400, "Invalid content")
-
-    if not allowed_filename(file_name):
+    if not is_valid_filename(file_name):
         abort(400, "Invalid file")
-
-    content_filename = f"{content_type}/{file_name}.zip"
-    blob = bucket.blob(content_filename)
-
+    content_full_name = f"{content_type}/{file_name}.zip"
+    blob = bucket.blob(content_full_name)
     if not blob.exists():
         abort(404, "File not found")
-
     with io.BytesIO() as content_data:
         blob.download_to_file(content_data)
         content_data.seek(0)
-        content_data_base64 = base64.b64encode(content_data.read()).decode("utf-8")
+        encoded_content_data = base64.b64encode(content_data.read()).decode("utf-8")
+    return jsonify({"name": file_name, "data": encoded_content_data}), 200
 
-    return jsonify({"name": file_name, "data": content_data_base64}), 200
 
-
-# Route for reporting a content file for review
+# Report specific content for moderation
 @app.route("/report/<content_type>/<file_name>", methods=["POST"])
 @limiter.exempt
 @require_api_key
 def report_content(content_type, file_name):
     if content_type not in ["levels", "characters"]:
         abort(400, "Invalid content")
-
     report_reason = request.form.get("report_reason", None)
     report_message = request.form.get("report_message", None)
-    content_filename = f"{content_type}/{file_name}.zip"
-    blob = bucket.blob(content_filename)
+    content_full_name = f"{content_type}/{file_name}.zip"
+    blob = bucket.blob(content_full_name)
     metadata = blob.metadata
-    keys = ["report_count", "report_reason"]
-
+    metadata_keys = ["report_count", "report_reason"]
     if not blob.exists():
         abort(404, "File not found")
-
     if blob.metadata is None:
         metadata = {}
-
-    for key in keys:
+    for key in metadata_keys:
         if key == "report_count":
-            value = int(metadata.get(key, 0)) + 1
-            metadata[key] = str(value)
+            report_count = int(metadata.get(key, 0)) + 1
+            metadata[key] = str(report_count)
         elif key == "report_reason":
             message = f'{report_reason}: {report_message if report_message else "No message provided."}'
             reasons = metadata.get(key, "").split("|")
             reasons.append(message)
             metadata[key] = "|".join(reasons)
-
     blob.metadata = metadata
     blob.patch()
-
-    if int(metadata[keys[0]]) >= 5:
-        console_url = "https://console.cloud.google.com/storage/browser/{}/{}".format(
-            bucket_name, file_name
-        )
-        requests.post(
-            "https://api.mailgun.net/v3/sandbox198029222f0640d5a146332e0cbdb7a1.mailgun.org/messages",
-            auth=("api", MAILGUN_API_KEY),
-            data={
-                "from": "Mailgun Sandbox <postmaster@sandbox198029222f0640d5a146332e0cbdb7a1.mailgun.org>",
-                "to": "Jonnil <contact@jonnil.games>",
-                "subject": "Sticky Paws - Content Report Alert",
-                "template": "sticky paws - content report alert",
-                "h:X-Mailgun-Variables": '{"file_name": "'
-                + content_filename
-                + '", "file_url": "'
-                + console_url
-                + '"}',
-            },
-            timeout=30,
-        )
-
     return "Report submitted successfully.", 200
 
 
-# Route for fetching how many levels and characters were uploaded today
+# Get today's uploads
 @app.route("/today", methods=["GET"])
 @limiter.exempt
-def today():
-    today = datetime.now(timezone.utc).date()
+def get_today_uploads():
+    today_date = datetime.now(timezone.utc).date()
 
-    # Function to count blobs uploaded today for a given prefix
-    def count_blobs_uploaded_today(prefix, exclude_unlisted=False):
+    # Count the number of uploads based on prefix and optionally exclude unlisted content
+    def count_uploads(prefix, exclude_unlisted=False):
         blobs = bucket.list_blobs(prefix=prefix)
         count = 0
         for blob in blobs:
-            if blob.time_created.date() == today:
-                if exclude_unlisted and check_unlisted(blob):
+            if blob.time_created.date() == today_date:
+                if exclude_unlisted and is_unlisted(blob):
                     continue
                 count += 1
         return count
 
-    # Get counts for each prefix
-    levels_uploaded_today = count_blobs_uploaded_today("levels/", exclude_unlisted=True)
-    characters_uploaded_today = count_blobs_uploaded_today("characters/")
-
-    return jsonify(
-        {
-            "levels_uploaded_today": levels_uploaded_today,
-            "characters_uploaded_today": characters_uploaded_today,
-        }
+    return (
+        jsonify(
+            {
+                "levels_uploaded_today": count_uploads("levels/", True),
+                "characters_uploaded_today": count_uploads("characters/"),
+            }
+        ),
+        200,
     )
 
 
-# Route for Nintendo Switch token validation
+# Validate the Nintendo authentication token
 @app.route("/validate_token", methods=["GET"])
 @limiter.exempt
-def validate_token():
+def validate_nintendo_token():
     id_token = request.args.get("id_token")
+    endpoint_key = request.args.get("endpoint", "dd1")
     if not id_token:
         return jsonify({"error": "Missing id_token"}), 400
-
     try:
-        # Decode without verification to get headers
+        endpoint_url = get_nintendo_endpoint(endpoint_key)
+        jwks_uri = f"{endpoint_url}/1.0.0/certificates"
         unverified_header = jwt.get_unverified_header(id_token)
-
-        # Validate the algorithm
         if unverified_header["alg"] != ALGORITHM:
             return jsonify({"error": "Invalid algorithm"}), 400
-
-        # Validate the jku
-        if unverified_header.get("jku") != JWKS_URI:
+        if unverified_header.get("jku") != jwks_uri:
             return jsonify({"error": "Invalid jku"}), 400
-
-        # Retrieve the public key
-        key = public_key(JWKS_URI, unverified_header["kid"])
+        key = fetch_public_key(jwks_uri, unverified_header["kid"])
         if not key:
             return jsonify({"error": "Public key not found"}), 400
-
-        # Decode and validate the JWT
         payload = jwt.decode(
             id_token,
             key,
             algorithms=[ALGORITHM],
-            issuer=ISSUER,
-            options={
-                "verify_aud": False,  # Disable audience verification
-                "verify_exp": False,  # Disable expiration verification
-            },
+            issuer=endpoint_url,
+            options={"verify_aud": False, "verify_exp": False},
         )
-
-        # Validate 'iat' and 'exp'
         if payload["iat"] > payload["exp"]:
             return jsonify({"error": "Invalid 'iat' and 'exp' values"}), 400
-
-        # Validate nintendo.ai value
-        nintendo = payload["nintendo"]
-        if nintendo["ai"].lower() != APPLICATION_ID.lower():
+        nintendo_data = payload["nintendo"]
+        if nintendo_data["ai"].lower() not in [
+            app_id.lower() for app_id in APPLICATION_IDS
+        ]:
             return jsonify({"error": "Invalid Nintendo AI value"}), 400
-
         return payload, 200
-
-    except jwt.ExpiredSignatureError as e:
-        print(f"Token expired: {e}")
+    except jwt.ExpiredSignatureError as error:
+        print(f"Token expired: {error}")
         return jsonify({"error": "Token has expired"}), 400
-    except jwt.InvalidAudienceError as e:
-        print(f"Invalid audience: {e}")
+    except jwt.InvalidAudienceError as error:
+        print(f"Invalid audience: {error}")
         return jsonify({"error": "Audience doesn't match"}), 400
-    except jwt.InvalidIssuerError as e:
-        print(f"Invalid issuer: {e}")
+    except jwt.InvalidIssuerError as error:
+        print(f"Invalid issuer: {error}")
         return jsonify({"error": "Issuer doesn't match"}), 400
-    except jwt.InvalidTokenError as e:
-        print(f"Invalid token: {e}")
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        print(f"Unexpected error: {e}")
+    except jwt.InvalidTokenError as error:
+        print(f"Invalid token: {error}")
+        return jsonify({"error": str(error)}), 400
+    except KeyError as error:
+        print(f"Invalid endpoint specified: {error}")
+        return jsonify({"error": f"Invalid endpoint specified: {endpoint_key}"}), 400
+    except Exception as error:
+        print(f"Unexpected error: {error}")
         return jsonify({"error": "An unexpected error occurred"}), 500
 
 
-# Route that returns "418 I'm a teapot" to all requests as an easter egg
+# Handle requests to '/teapot' and '/coffee' with a humorous response
 @app.route(
     "/teapot", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 )
@@ -654,19 +543,19 @@ def validate_token():
     "/coffee", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 )
 @limiter.exempt
-def teapot():
+def handle_teapot():
     return "I'm a teapot", 418
 
 
-# Route that returns "500 lp0 on fire" to all requests as an easter egg
+# Handle requests to '/print' with a humorous error response
 @app.route(
     "/print", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 )
 @limiter.exempt
-def lp0():
+def handle_lp0():
     return "lp0 on fire", 500
 
 
-# Start the Flask application
+# Run the Flask application
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
