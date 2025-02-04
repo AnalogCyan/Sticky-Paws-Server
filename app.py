@@ -19,23 +19,6 @@ from tenacity import (
     retry_if_exception_type,
 )
 
-# Dictionary of Nintendo endpoints
-NINTENDO_ENDPOINTS = {
-    "jd1": "https://d78dbb1c550d43c6af49bf0465cbc094-sb.baas.nintendo.com",
-    "dd1": "https://e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com",
-    "dp1": "https://d9c8ea0e17f68dbeab8674c59f6fbada-sb.baas.nintendo.com",
-    "sd1": "https://96130dc40283b737c07719e6c9514de-sb.baas.nintendo.com",
-    "sp1": "https://dc219b6b3aa8e06873733fd1af0e03-sb.baas.nintendo.com",
-    "lp1": "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com",
-}
-
-
-# Get the Nintendo endpoint based on a key
-def get_nintendo_endpoint(endpoint_key):
-    return (
-        NINTENDO_ENDPOINTS[endpoint_key] if endpoint_key in NINTENDO_ENDPOINTS else None
-    )
-
 
 # Custom exception for key fetching errors
 class KeyFetchError(Exception):
@@ -74,10 +57,8 @@ secret_response = secret_manager_client.access_secret_version(name=secret_name)
 API_KEY = secret_response.payload.data.decode("UTF-8")
 
 # JWT settings
-ISSUER = get_nintendo_endpoint("dd1")
-JWKS_URI = f"{ISSUER}/1.0.0/certificates"
-APPLICATION_IDS = ["01004b9000490000", "0100c8201aa36000"]
 ALGORITHM = "RS256"
+APPLICATION_IDS = ["01004b9000490000", "0100c8201aa36000"]
 
 
 # Decorator to enforce API key requirement
@@ -481,40 +462,63 @@ def get_today_uploads():
     )
 
 
-# Validate the Nintendo authentication token
+# Validate Nintendo token
 @app.route("/validate_token", methods=["GET"])
 @limiter.exempt
 def validate_nintendo_token():
     id_token = request.args.get("id_token")
-    endpoint_key = request.args.get("endpoint", "dd1")
     if not id_token:
         return jsonify({"error": "Missing id_token"}), 400
+
     try:
-        endpoint_url = get_nintendo_endpoint(endpoint_key)
-        jwks_uri = f"{endpoint_url}/1.0.0/certificates"
+        # Get unverified header to access token metadata
         unverified_header = jwt.get_unverified_header(id_token)
+
+        # Validate algorithm
         if unverified_header["alg"] != ALGORITHM:
             return jsonify({"error": "Invalid algorithm"}), 400
+
+        # Get token claims without verification to access issuer
+        unverified_claims = jwt.decode(id_token, options={"verify_signature": False})
+        issuer = unverified_claims.get("iss")
+
+        if not issuer:
+            return jsonify({"error": "Missing issuer claim"}), 400
+
+        # Construct JWKS URI from issuer
+        jwks_uri = f"{issuer}/1.0.0/certificates"
+
+        # Validate JKU matches issuer
         if unverified_header.get("jku") != jwks_uri:
             return jsonify({"error": "Invalid jku"}), 400
+
+        # Fetch public key and verify token
         key = fetch_public_key(jwks_uri, unverified_header["kid"])
         if not key:
             return jsonify({"error": "Public key not found"}), 400
+
+        # Verify token with appropriate issuer
         payload = jwt.decode(
             id_token,
             key,
             algorithms=[ALGORITHM],
-            issuer=endpoint_url,
+            issuer=issuer,
             options={"verify_aud": False, "verify_exp": False},
         )
+
+        # Validate timestamp order
         if payload["iat"] > payload["exp"]:
             return jsonify({"error": "Invalid 'iat' and 'exp' values"}), 400
+
+        # Validate application ID
         nintendo_data = payload["nintendo"]
         if nintendo_data["ai"].lower() not in [
             app_id.lower() for app_id in APPLICATION_IDS
         ]:
             return jsonify({"error": "Invalid Nintendo AI value"}), 400
+
         return payload, 200
+
     except jwt.ExpiredSignatureError as error:
         print(f"Token expired: {error}")
         return jsonify({"error": "Token has expired"}), 400
@@ -527,9 +531,6 @@ def validate_nintendo_token():
     except jwt.InvalidTokenError as error:
         print(f"Invalid token: {error}")
         return jsonify({"error": str(error)}), 400
-    except KeyError as error:
-        print(f"Invalid endpoint specified: {error}")
-        return jsonify({"error": f"Invalid endpoint specified: {endpoint_key}"}), 400
     except Exception as error:
         print(f"Unexpected error: {error}")
         return jsonify({"error": "An unexpected error occurred"}), 500
