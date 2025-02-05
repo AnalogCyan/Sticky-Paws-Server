@@ -69,6 +69,11 @@ bucket = storage_client.get_bucket(bucket_name)
 # Google Sheets settings
 SPREADSHEET_ID = "1xjr3aSuGqAA1FxXzbUjHVL5MY8U8Y-JThBF_XNpvlkM"
 SHEET_NAME = "localization"
+credentials, _ = google.auth.default(
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
+service = build("sheets", "v4", credentials=credentials)
+
 
 # region Helper Functions
 # Decorator to enforce API key requirement
@@ -241,14 +246,6 @@ def fetch_public_key(jwks_uri, key_id):
 
 
 # Log the provided translation key into the Google Sheet
-
-# Authenticate Google Sheets API using either a service account file or default credentials
-# Use default credentials when running on App Engine
-credentials, _ = google.auth.default(
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
-service = build("sheets", "v4", credentials=credentials)
-
 def log_missing_translation_key(translation_key):
     """
     Log the provided translation key into the Google Sheet.
@@ -305,6 +302,7 @@ def log_missing_translation_key(translation_key):
 
 
 # endregion
+
 
 # region Routes
 # Serve static files from the 'static' directory
