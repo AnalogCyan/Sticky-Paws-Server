@@ -557,6 +557,86 @@ def handle_lp0():
     return "lp0 on fire", 500
 
 
+@app.route("/health", methods=["GET"])
+@limiter.exempt  # Don't rate limit health checks
+def health_check():
+    health_status = {"status": "ok"}
+
+    # Check Google Cloud Storage
+    try:
+        bucket = storage_client.get_bucket(bucket_name)
+        if not bucket:
+            raise Exception("Bucket not found")
+        health_status["storage"] = "ok"
+    except Exception as e:
+        health_status["storage"] = f"error: {str(e)}"
+
+    # Check Google Secret Manager
+    try:
+        secret_response = secret_manager_client.access_secret_version(name=secret_name)
+        if not secret_response:
+            raise Exception("Secret Manager unavailable")
+        health_status["secret_manager"] = "ok"
+    except Exception as e:
+        health_status["secret_manager"] = f"error: {str(e)}"
+
+    # Check JWT Key Fetching
+    try:
+        jwks_uri = "https://some-nintendo-api.com/jwks"
+        jwks = get_jwks_with_retry(jwks_uri)
+        if not jwks or "keys" not in jwks:
+            raise Exception("JWKS fetch failed")
+        health_status["jwt_keys"] = "ok"
+    except Exception as e:
+        health_status["jwt_keys"] = f"error: {str(e)}"
+
+    # Check Rate Limiter
+    try:
+        test_limit = limiter.get_limits(request.endpoint)
+        health_status["rate_limiter"] = "ok" if test_limit else "error"
+    except Exception as e:
+        health_status["rate_limiter"] = f"error: {str(e)}"
+
+    # If any check failed, return 500 status
+    if any("error" in v for v in health_status.values()):
+        return jsonify(health_status), 500
+
+    return jsonify(health_status), 200
+
+
+@app.route("/endpoint_status", methods=["GET"])
+@limiter.exempt  # Avoid rate limiting on this check
+def check_endpoints():
+    test_routes = [
+        "/",  # Homepage
+        "/upload",
+        "/levels",
+        "/characters",
+        "/metadata/levels/testfile",
+        "/metadata/characters/testfile",
+        "/download/levels/testfile",
+        "/download/characters/testfile",
+        "/today",
+        "/validate_token",
+    ]
+
+    results = {}
+
+    for route in test_routes:
+        try:
+            response = requests.get(
+                f"https://{app.config['SERVER_NAME']}{route}", timeout=2
+            )
+            results[route] = {
+                "status_code": response.status_code,
+                "status": "ok" if response.ok else "error",
+            }
+        except requests.RequestException as e:
+            results[route] = {"status": "error", "error": str(e)}
+
+    return jsonify(results), 200
+
+
 # Run the Flask application
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
