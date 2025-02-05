@@ -61,6 +61,7 @@ ALGORITHM = "RS256"
 APPLICATION_IDS = ["01004b9000490000", "0100c8201aa36000"]
 
 
+# region Helper Functions
 # Decorator to enforce API key requirement
 def require_api_key(func):
     @wraps(func)
@@ -230,12 +231,15 @@ def fetch_public_key(jwks_uri, key_id):
         return None
 
 
+# endregion
+
 # Initialize Google Cloud Storage client and bucket
 storage_client = storage.Client()
 bucket_name = "sticky-paws.appspot.com"
 bucket = storage_client.get_bucket(bucket_name)
 
 
+# region Routes
 # Serve static files from the 'static' directory
 @app.route("/", defaults={"path": "index.html"})
 @app.route("/<path:path>")
@@ -636,6 +640,8 @@ def check_endpoints():
 
     return jsonify(results), 200
 
+
+# endregion
 
 # Run the Flask application
 if __name__ == "__main__":
