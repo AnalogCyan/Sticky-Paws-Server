@@ -1,4 +1,4 @@
-import base64, io, json, os, zipfile, jwt
+import base64, io, json, os, zipfile, jwt, google.auth
 from io import BytesIO, StringIO
 from functools import wraps
 from configparser import ConfigParser
@@ -8,6 +8,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from google.cloud import storage, secretmanager
+from googleapiclient.discovery import build
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from cryptography.hazmat.primitives import serialization
@@ -18,7 +19,7 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
-
+import logging
 
 # Custom exception for key fetching errors
 class KeyFetchError(Exception):
@@ -59,6 +60,19 @@ API_KEY = secret_response.payload.data.decode("UTF-8")
 # JWT settings
 ALGORITHM = "RS256"
 APPLICATION_IDS = ["01004b9000490000", "0100c8201aa36000"]
+
+# Initialize Google Cloud Storage client and bucket
+storage_client = storage.Client()
+bucket_name = "sticky-paws.appspot.com"
+bucket = storage_client.get_bucket(bucket_name)
+
+# Google Sheets settings
+SPREADSHEET_ID = "1xjr3aSuGqAA1FxXzbUjHVL5MY8U8Y-JThBF_XNpvlkM"
+SHEET_NAME = "localization"
+credentials, _ = google.auth.default(
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
+service = build("sheets", "v4", credentials=credentials)
 
 
 # region Helper Functions
@@ -231,12 +245,63 @@ def fetch_public_key(jwks_uri, key_id):
         return None
 
 
-# endregion
+# Log the provided translation key into the Google Sheet
+def log_missing_translation_key(translation_key):
+    """
+    Log the provided translation key into the Google Sheet.
 
-# Initialize Google Cloud Storage client and bucket
-storage_client = storage.Client()
-bucket_name = "sticky-paws.appspot.com"
-bucket = storage_client.get_bucket(bucket_name)
+    This function retrieves the current data from the Google Sheet, checks if the given
+    translation key already exists, and if not, appends a new row with the key and the
+    current timestamp.
+
+    :param translation_key: The translation key to log.
+    :type translation_key: str
+    :raises Exception: Propagates any exception that occurs during the API call.
+    """
+    try:
+        # Fetch the current data from the sheet
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=SPREADSHEET_ID, range=f"{SHEET_NAME}!A:C")
+            .execute()
+        )
+        # Ensure result is a dictionary (fallback to {} if None) before calling .get()
+        rows = (result or {}).get("values", [])
+
+        # Check if the key already exists
+        for row in rows:
+            if len(row) > 0 and row[0] == translation_key:
+                print(
+                    f"Translation key '{translation_key}' already exists in the sheet."
+                )
+                return
+
+        # Find the next empty row (Google Sheets rows are 1-indexed)
+        next_row = len(rows) + 1
+
+        # Get the current date and time
+        current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Prepare the new row data
+        new_row = [translation_key, current_datetime, translation_key]
+
+        # Update the Google Sheet
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"{SHEET_NAME}!A{next_row}",
+            valueInputOption="RAW",
+            body={"values": [new_row]},
+        ).execute()
+
+        print(f"Logged translation key '{translation_key}' in row {next_row}.")
+
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"Error logging translation key: {e}")
+        raise
+
+
+# endregion
 
 
 # region Routes
@@ -559,6 +624,32 @@ def handle_teapot():
 @limiter.exempt
 def handle_lp0():
     return "lp0 on fire", 500
+
+
+# Handle requests to '/sync_translation' to log missing translation keys
+@app.route("/sync_translation", methods=["POST"])
+def sync_translation():
+    """
+    Receives a translation key from the client and logs it into Google Sheets.
+    Supports both JSON and multipart/form-data requests.
+    """
+    # Check if the request is JSON; if not, use form data.
+    if request.is_json:
+        data = request.get_json()
+    else:
+        data = request.form
+
+    # Validate that we got data and that it contains a key.
+    if data is None or "key" not in data or not data["key"]:
+        return jsonify({"error": "No translation key provided"}), 400
+
+    translation_key = data.get("key")
+    try:
+        log_missing_translation_key(translation_key)  # Log the key in Google Sheets
+        return jsonify({"success": True}), 200
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.error("Error in sync_translation: %s", str(e))
+        return jsonify({"error": "An internal error has occurred"}), 500
 
 
 # endregion
