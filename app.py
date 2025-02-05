@@ -19,7 +19,7 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
-
+import logging
 
 # Custom exception for key fetching errors
 class KeyFetchError(Exception):
@@ -648,7 +648,8 @@ def sync_translation():
         log_missing_translation_key(translation_key)  # Log the key in Google Sheets
         return jsonify({"success": True}), 200
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return jsonify({"error": str(e)}), 500
+        logging.error("Error in sync_translation: %s", str(e))
+        return jsonify({"error": "An internal error has occurred"}), 500
 
 
 # endregion
