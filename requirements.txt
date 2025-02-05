@@ -3,6 +3,7 @@ Flask-Limiter
 Flask-Talisman
 google-cloud-storage
 google-cloud-secret-manager
+google-api-python-client
 itsdangerous
 cryptography
 requests
