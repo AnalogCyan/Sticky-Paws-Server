@@ -21,6 +21,7 @@ from tenacity import (
 )
 import logging
 
+
 # Custom exception for key fetching errors
 class KeyFetchError(Exception):
     pass
@@ -650,6 +651,42 @@ def sync_translation():
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.error("Error in sync_translation: %s", str(e))
         return jsonify({"error": "An internal error has occurred"}), 500
+
+
+# Receive crash logs from the game client
+@app.route("/crashlog", methods=["POST"])
+@require_api_key
+def receive_crash_log():
+    # Ensure the request payload is JSON.
+    if not request.is_json:
+        return jsonify({"error": "Expected JSON payload"}), 400
+
+    data = request.get_json()
+
+    # Validate required fields.
+    required_fields = ["game_name", "timestamp", "crash_details", "debug_info"]
+    for field in required_fields:
+        if field not in data or not data[field]:
+            return jsonify({"error": f"Missing field: {field}"}), 400
+
+    # Construct a filename for the crash log.
+    # Replace characters that might not be allowed in filenames.
+    timestamp_safe = data["timestamp"].replace(":", "_").replace(" ", "_")
+    filename = f"crash_logs/{data['game_name']}_{timestamp_safe}_crash.txt"
+
+    # Combine crash details and debug info.
+    crash_content = data["crash_details"] + "\n\n\n" + data["debug_info"]
+
+    try:
+        # Upload the crash log to your Cloud Storage bucket.
+        blob = bucket.blob(filename)
+        blob.upload_from_string(crash_content, content_type="text/plain")
+    except Exception as e:
+        logging.error("Error uploading crash log: %s", e)
+        return jsonify({"error": "Failed to save crash log"}), 500
+
+    # Optionally, you might log the crash log URL or return it to the client.
+    return jsonify({"success": True, "filename": filename}), 200
 
 
 # endregion
