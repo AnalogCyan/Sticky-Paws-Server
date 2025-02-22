@@ -18,6 +18,7 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
+from concurrent.futures import ThreadPoolExecutor
 
 
 # Custom exception for key fetching errors
@@ -561,45 +562,53 @@ def handle_lp0():
     return "lp0 on fire", 500
 
 
+# Handle health check requests
 @app.route("/health", methods=["GET"])
 @limiter.exempt  # Don't rate limit health checks
 def health_check():
+    """Performs a health check for various services used by the application."""
     health_status = {"status": "ok"}
 
-    # Check Google Cloud Storage
-    try:
-        bucket = storage_client.get_bucket(bucket_name)
-        if not bucket:
-            raise Exception("Bucket not found")
-        health_status["storage"] = "ok"
-    except Exception as e:
-        health_status["storage"] = f"error: {str(e)}"
+    def check_gcs():
+        """Check Google Cloud Storage."""
+        try:
+            bucket = storage_client.get_bucket(bucket_name)
+            return "ok" if bucket else "error: Bucket not found"
+        except Exception as e:
+            return f"error: {str(e)}"
 
-    # Check Google Secret Manager
-    try:
-        secret_response = secret_manager_client.access_secret_version(name=secret_name)
-        if not secret_response:
-            raise Exception("Secret Manager unavailable")
-        health_status["secret_manager"] = "ok"
-    except Exception as e:
-        health_status["secret_manager"] = f"error: {str(e)}"
+    def check_secret_manager():
+        """Check Google Secret Manager."""
+        try:
+            secret_response = secret_manager_client.access_secret_version(
+                name=secret_name
+            )
+            return "ok" if secret_response else "error: Secret Manager unavailable"
+        except Exception as e:
+            return f"error: {str(e)}"
 
-    # Check JWT Key Fetching
-    try:
-        jwks_uri = "https://some-nintendo-api.com/jwks"
-        jwks = get_jwks_with_retry(jwks_uri)
-        if not jwks or "keys" not in jwks:
-            raise Exception("JWKS fetch failed")
-        health_status["jwt_keys"] = "ok"
-    except Exception as e:
-        health_status["jwt_keys"] = f"error: {str(e)}"
+    def check_jwt_keys():
+        """Check JWT key fetching using the existing fetch_public_key function."""
+        try:
+            # Retrieve a Nintendo JWKS URI dynamically by calling get_jwks_with_retry
+            jwks_uri = "https://accounts.nintendo.com/1.0.0/certificates"
+            jwks = get_jwks_with_retry(jwks_uri)
 
-    # Check Rate Limiter
-    try:
-        test_limit = limiter.get_limits(request.endpoint)
-        health_status["rate_limiter"] = "ok" if test_limit else "error"
-    except Exception as e:
-        health_status["rate_limiter"] = f"error: {str(e)}"
+            if not jwks or "keys" not in jwks:
+                return "error: JWKS fetch failed"
+
+            # Check if we can extract a key from the JWKS
+            key_id = jwks["keys"][0]["kid"] if "keys" in jwks and jwks["keys"] else None
+            public_key = fetch_public_key(jwks_uri, key_id) if key_id else None
+
+            return "ok" if public_key else "error: Public key retrieval failed"
+        except Exception as e:
+            return f"error: {str(e)}"
+
+    # Run checks
+    health_status["storage"] = check_gcs()
+    health_status["secret_manager"] = check_secret_manager()
+    health_status["jwt_keys"] = check_jwt_keys()
 
     # If any check failed, return 500 status
     if any("error" in v for v in health_status.values()):
@@ -608,35 +617,39 @@ def health_check():
     return jsonify(health_status), 200
 
 
+# Handle endpoint status check requests
 @app.route("/endpoint_status", methods=["GET"])
 @limiter.exempt  # Avoid rate limiting on this check
 def check_endpoints():
-    test_routes = [
-        "/",  # Homepage
-        "/upload",
-        "/levels",
-        "/characters",
-        "/metadata/levels/testfile",
-        "/metadata/characters/testfile",
-        "/download/levels/testfile",
-        "/download/characters/testfile",
-        "/today",
-        "/validate_token",
-    ]
+    """Performs a status check on key application endpoints."""
+    base_url = f"https://{app.config['SERVER_NAME']}"
 
-    results = {}
+    # Dynamically fetch registered routes, excluding ones with parameters and non-GET routes
+    test_routes = {
+        rule.rule
+        for rule in app.url_map.iter_rules()
+        if rule.rule != "/endpoint_status"
+        and "<" not in rule.rule  # ✅ Exclude parameterized routes
+        and "GET" in rule.methods  # ✅ Only test routes that support GET
+    }
 
-    for route in test_routes:
+    def check_route(route):
+        """Send a request to a specific route and capture the response."""
         try:
-            response = requests.get(
-                f"https://{app.config['SERVER_NAME']}{route}", timeout=2
-            )
-            results[route] = {
+            response = requests.get(f"{base_url}{route}", timeout=5)
+            return {
                 "status_code": response.status_code,
                 "status": "ok" if response.ok else "error",
             }
         except requests.RequestException as e:
-            results[route] = {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(e)}
+
+    # Run endpoint checks concurrently
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(check_route, route): route for route in test_routes}
+        for future in futures:
+            results[futures[future]] = future.result()
 
     return jsonify(results), 200
 
