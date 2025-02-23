@@ -664,7 +664,7 @@ def receive_crash_log():
     data = request.get_json()
 
     # Validate required fields.
-    required_fields = ["game_name", "timestamp", "crash_details", "debug_info"]
+    required_fields = ["game_name", "game_version", "timestamp", "ini_content"]
     for field in required_fields:
         if field not in data or not data[field]:
             return jsonify({"error": f"Missing field: {field}"}), 400
@@ -672,10 +672,10 @@ def receive_crash_log():
     # Construct a filename for the crash log.
     # Replace characters that might not be allowed in filenames.
     timestamp_safe = data["timestamp"].replace(":", "_").replace(" ", "_")
-    filename = f"crash_logs/{data['game_name']}_{timestamp_safe}_crash.txt"
+    filename = f"crash_logs/{data['game_name']}_{timestamp_safe}_crash.ini"
 
-    # Combine crash details and debug info.
-    crash_content = data["crash_details"] + "\n\n\n" + data["debug_info"]
+    # Use the full .ini content sent by the client.
+    crash_content = data["ini_content"]
 
     try:
         # Upload the crash log to your Cloud Storage bucket.
@@ -685,7 +685,7 @@ def receive_crash_log():
         logging.error("Error uploading crash log: %s", e)
         return jsonify({"error": "Failed to save crash log"}), 500
 
-    # Optionally, you might log the crash log URL or return it to the client.
+    # Optionally, log the crash log URL or return it to the client.
     return jsonify({"success": True, "filename": filename}), 200
 
 
