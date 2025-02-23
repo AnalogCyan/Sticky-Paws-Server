@@ -669,10 +669,13 @@ def receive_crash_log():
         if field not in data or not data[field]:
             return jsonify({"error": f"Missing field: {field}"}), 400
 
-    # Construct a filename for the crash log.
-    # Replace characters that might not be allowed in filenames.
-    timestamp_safe = data["timestamp"].replace(":", "_").replace(" ", "_")
-    filename = f"crash_logs/{data['game_name']}_{timestamp_safe}_crash.ini"
+    # Determine the filename: use 'crash_log_filename' from the payload if provided,
+    # otherwise construct one from game_name, game_version and timestamp.
+    if "crash_log_filename" in data and data["crash_log_filename"]:
+        filename = f"crash_logs/{data['crash_log_filename']}"
+    else:
+        timestamp_safe = data["timestamp"].replace(":", "_").replace(" ", "_")
+        filename = f"crash_logs/crash-{data['game_name']} v{data['game_version']} {timestamp_safe}.ini"
 
     # Use the full .ini content sent by the client.
     crash_content = data["ini_content"]
@@ -685,7 +688,7 @@ def receive_crash_log():
         logging.error("Error uploading crash log: %s", e)
         return jsonify({"error": "Failed to save crash log"}), 500
 
-    # Optionally, log the crash log URL or return it to the client.
+    # Optionally, log or return the crash log URL.
     return jsonify({"success": True, "filename": filename}), 200
 
 
