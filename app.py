@@ -629,6 +629,7 @@ def handle_lp0():
 
 # Handle requests to '/sync_translation' to log missing translation keys
 @app.route("/sync_translation", methods=["POST"])
+@limiter.exempt
 def sync_translation():
     """
     Receives a translation key from the client and logs it into Google Sheets.
